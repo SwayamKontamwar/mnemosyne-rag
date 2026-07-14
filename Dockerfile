@@ -5,7 +5,10 @@ WORKDIR /app
 COPY pyproject.toml README.md /app/
 COPY mnemosyne /app/mnemosyne
 
-RUN pip install --no-cache-dir .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir '.[full]'
 
 EXPOSE 8765
 
