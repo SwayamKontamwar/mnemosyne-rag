@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .config import Settings
@@ -67,15 +68,15 @@ def main() -> None:
             print(f"[{index}] {hit.citation}")
     elif args.command == "watch":
         if args.scan:
-            print(kb.scan_watch_folders())
+            print(json.dumps(kb.scan_watch_folders(), indent=2))
         elif args.path:
-            indexed, skipped = kb.register_watch_folder(args.path, args.profile)
+            indexed, skipped = kb.register_watch_folder(Path(args.path), args.profile)
             print(f"Watching {Path(args.path).expanduser()} — indexed {indexed}, skipped {skipped}.")
         else:
             for watch in kb.store.list_watch_folders():
                 print(f"{watch.path} [{watch.profile}]")
     elif args.command == "backup":
-        print(kb.backup())
+        print(json.dumps(kb.backup(), indent=2))
     elif args.command == "serve":
         import uvicorn
 
