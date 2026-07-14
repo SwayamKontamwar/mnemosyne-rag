@@ -22,6 +22,9 @@ def parser() -> argparse.ArgumentParser:
     links = commands.add_parser("backlinks", help="Find semantically related notes")
     links.add_argument("document")
     links.add_argument("--limit", type=int, default=10)
+    serve = commands.add_parser("serve", help="Launch the local web application")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
     return root
 
 
@@ -44,6 +47,10 @@ def main() -> None:
         print("\nSources:")
         for index, hit in enumerate(hits, 1):
             print(f"[{index}] {hit.citation}")
+    elif args.command == "serve":
+        import uvicorn
+
+        uvicorn.run("mnemosyne.web:app", host=args.host, port=args.port, reload=False)
 
 
 def _print_hits(hits: list) -> None:
@@ -56,4 +63,3 @@ def _print_hits(hits: list) -> None:
 
 if __name__ == "__main__":
     main()
-
