@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
-from .models import Chunk, ChunkPreview, DocumentRecord, GraphEdge, SearchHit, TopicCluster
+from .models import Chunk, ChunkPreview, ConversationEntry, DocumentRecord, GraphEdge, SavedSearch, SearchHit, TopicCluster, WatchFolder
 
 
 class KnowledgeStore:
@@ -33,6 +33,50 @@ class KnowledgeStore:
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
                 text, title, content='chunks', content_rowid='id'
+            );
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS saved_searches (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                query TEXT NOT NULL,
+                tag TEXT,
+                folder TEXT,
+                file_type TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id INTEGER PRIMARY KEY,
+                mode TEXT NOT NULL,
+                query TEXT NOT NULL,
+                answer TEXT DEFAULT '',
+                payload TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS watch_folders (
+                path TEXT PRIMARY KEY,
+                profile TEXT DEFAULT 'local',
+                enabled INTEGER DEFAULT 1,
+                indexed_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS collections (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                tags TEXT DEFAULT '[]',
+                query TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id INTEGER PRIMARY KEY,
+                query TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                cited_numbers TEXT DEFAULT '[]',
+                missing_numbers TEXT DEFAULT '[]',
+                unsupported_numbers TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
                 INSERT INTO chunks_fts(rowid, text, title) VALUES (new.id, new.text, new.title);
@@ -203,7 +247,18 @@ class KnowledgeStore:
         tags = self.connection.execute(
             "SELECT COALESCE(SUM(json_array_length(tags)), 0) count FROM documents"
         ).fetchone()["count"]
-        return {"documents": documents, "chunks": chunks, "characters": characters, "tags": tags}
+        saved_searches = self.connection.execute("SELECT COUNT(*) count FROM saved_searches").fetchone()["count"]
+        conversations = self.connection.execute("SELECT COUNT(*) count FROM conversation_history").fetchone()["count"]
+        watch_folders = self.connection.execute("SELECT COUNT(*) count FROM watch_folders WHERE enabled = 1").fetchone()["count"]
+        return {
+            "documents": documents,
+            "chunks": chunks,
+            "characters": characters,
+            "tags": tags,
+            "saved_searches": saved_searches,
+            "conversations": conversations,
+            "watch_folders": watch_folders,
+        }
 
     def list_tags(self) -> list[str]:
         rows = self.connection.execute("SELECT tags FROM documents").fetchall()
@@ -228,6 +283,25 @@ class KnowledgeStore:
             end_line=row["end_line"],
             tags=tuple(json.loads(row["tags"] or "[]")),
         )
+
+    def document_chunks(self, path: str) -> list[ChunkPreview]:
+        rows = self.connection.execute(
+            "SELECT * FROM chunks WHERE document_path = ? ORDER BY ordinal",
+            (path,),
+        ).fetchall()
+        return [
+            ChunkPreview(
+                chunk_id=row["id"],
+                title=row["title"],
+                text=row["text"],
+                citation=row["citation"],
+                page=row["page"],
+                start_line=row["start_line"],
+                end_line=row["end_line"],
+                tags=tuple(json.loads(row["tags"] or "[]")),
+            )
+            for row in rows
+        ]
 
     def graph_edges(self, limit: int = 24) -> list[GraphEdge]:
         documents = self.list_documents()
@@ -279,6 +353,148 @@ class KnowledgeStore:
                 )
             )
         return clusters
+
+    def save_setting(self, key: str, value: dict | list | str | int | bool | None) -> None:
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO app_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(value)),
+            )
+
+    def load_settings(self) -> dict:
+        rows = self.connection.execute("SELECT key, value FROM app_settings").fetchall()
+        return {row["key"]: json.loads(row["value"]) for row in rows}
+
+    def create_saved_search(self, name: str, query: str, tag: str | None, folder: str | None, file_type: str | None) -> int:
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT INTO saved_searches(name, query, tag, folder, file_type) VALUES (?, ?, ?, ?, ?)",
+                (name, query, tag, folder, file_type),
+            )
+        return int(cursor.lastrowid)
+
+    def list_saved_searches(self) -> list[SavedSearch]:
+        rows = self.connection.execute("SELECT * FROM saved_searches ORDER BY created_at DESC").fetchall()
+        return [
+            SavedSearch(
+                id=row["id"],
+                name=row["name"],
+                query=row["query"],
+                tag=row["tag"],
+                folder=row["folder"],
+                file_type=row["file_type"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def log_conversation(self, mode: str, query: str, answer: str = "", payload: dict | None = None) -> int:
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT INTO conversation_history(mode, query, answer, payload) VALUES (?, ?, ?, ?)",
+                (mode, query, answer, json.dumps(payload or {})),
+            )
+        return int(cursor.lastrowid)
+
+    def conversation_history(self, limit: int = 50) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT * FROM conversation_history ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            dict(
+                ConversationEntry(
+                    id=row["id"],
+                    mode=row["mode"],
+                    query=row["query"],
+                    answer=row["answer"],
+                    created_at=row["created_at"],
+                ).__dict__
+            ) | {"payload": json.loads(row["payload"] or "{}")}
+            for row in rows
+        ]
+
+    def upsert_watch_folder(self, path: str, profile: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO watch_folders(path, profile, enabled) VALUES (?, ?, 1)
+                ON CONFLICT(path) DO UPDATE SET profile=excluded.profile, enabled=1, indexed_at=CURRENT_TIMESTAMP
+                """,
+                (path, profile),
+            )
+
+    def list_watch_folders(self) -> list[WatchFolder]:
+        rows = self.connection.execute("SELECT * FROM watch_folders ORDER BY path").fetchall()
+        return [
+            WatchFolder(
+                path=row["path"],
+                profile=row["profile"],
+                enabled=bool(row["enabled"]),
+                indexed_at=row["indexed_at"],
+            )
+            for row in rows
+        ]
+
+    def save_collection(self, name: str, description: str, tags: list[str], query: str) -> int:
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT INTO collections(name, description, tags, query) VALUES (?, ?, ?, ?)",
+                (name, description, json.dumps(tags), query),
+            )
+        return int(cursor.lastrowid)
+
+    def list_collections(self) -> list[dict]:
+        rows = self.connection.execute("SELECT * FROM collections ORDER BY created_at DESC").fetchall()
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "tags": json.loads(row["tags"] or "[]"),
+                "query": row["query"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def log_evaluation(self, query: str, verdict: str, cited_numbers: list[int], missing_numbers: list[int], unsupported_numbers: list[int]) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO evaluations(query, verdict, cited_numbers, missing_numbers, unsupported_numbers)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    query,
+                    verdict,
+                    json.dumps(cited_numbers),
+                    json.dumps(missing_numbers),
+                    json.dumps(unsupported_numbers),
+                ),
+            )
+
+    def evaluation_summary(self) -> dict:
+        rows = self.connection.execute("SELECT verdict, COUNT(*) count FROM evaluations GROUP BY verdict").fetchall()
+        counts = {row["verdict"]: row["count"] for row in rows}
+        recent = self.connection.execute(
+            "SELECT query, verdict, created_at FROM evaluations ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
+        return {
+            "counts": counts,
+            "recent": [dict(row) for row in recent],
+        }
+
+    def backup_payload(self) -> dict:
+        return {
+            "documents": self.list_documents(),
+            "saved_searches": [search.__dict__ for search in self.list_saved_searches()],
+            "conversation_history": self.conversation_history(100),
+            "watch_folders": [watch.__dict__ for watch in self.list_watch_folders()],
+            "collections": self.list_collections(),
+            "settings": self.load_settings(),
+            "evaluations": self.evaluation_summary(),
+        }
 
     def _chunk_rows(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[sqlite3.Row]:
         filters = []
