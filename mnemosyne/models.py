@@ -123,3 +123,12 @@ class WatchFolder:
     profile: str = "local"
     enabled: bool = True
     indexed_at: str = ""
+
+
+@dataclass(frozen=True)
+class ParseDiagnostic:
+    path: str
+    level: str
+    code: str
+    message: str
+    created_at: str = ""
