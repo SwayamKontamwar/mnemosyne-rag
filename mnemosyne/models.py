@@ -47,6 +47,15 @@ class SearchHit:
 
 
 @dataclass(frozen=True)
+class CitationValidation:
+    cited_numbers: tuple[int, ...] = ()
+    missing_numbers: tuple[int, ...] = ()
+    unsupported_numbers: tuple[int, ...] = ()
+    answer_has_citations: bool = False
+    verdict: str = "unverified"
+
+
+@dataclass(frozen=True)
 class DocumentRecord:
     path: str
     title: str
