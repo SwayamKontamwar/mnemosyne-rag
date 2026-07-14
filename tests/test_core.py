@@ -2,6 +2,7 @@ from pathlib import Path
 
 from mnemosyne.config import Settings
 from mnemosyne.ingest import chunk_document
+from mnemosyne.models import SearchHit
 from mnemosyne.models import SourceDocument
 from mnemosyne.service import KnowledgeBase
 
@@ -62,3 +63,27 @@ def test_chunk_previews_graph_and_clusters(tmp_path: Path):
     assert edges
     clusters = kb.clusters()
     assert clusters
+
+
+def test_reranking_prefers_term_overlap():
+    settings = Settings(Path("/tmp/data"), Path("/tmp/data/knowledge.db"))
+    kb = KnowledgeBase(settings)
+    hits = [
+        SearchHit(1, "generic context", "misc", "a#L1-L2", 0.9, ("other",)),
+        SearchHit(2, "hybrid retrieval improves grounded answers", "retrieval", "b#L1-L2", 0.7, ("rag",)),
+    ]
+    reranked = kb._rerank("hybrid retrieval", hits)
+    assert reranked[0].chunk_id == 2
+
+
+def test_citation_validation_flags_missing_and_weak_support(tmp_path: Path):
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db")
+    kb = KnowledgeBase(settings)
+    hits = [
+        SearchHit(1, "Hybrid retrieval improves grounded answers.", "retrieval", "a#L1-L2", 0.8, ("rag",)),
+        SearchHit(2, "Citation validation audits answers.", "validation", "b#L1-L2", 0.7, ("rag",)),
+    ]
+    validation = kb._validate_citations("Hybrid retrieval helps [1]. Unsupported claim about OCR [2]. Missing source [3].", hits)
+    assert validation.answer_has_citations is True
+    assert 3 in validation.missing_numbers
+    assert 2 in validation.unsupported_numbers
