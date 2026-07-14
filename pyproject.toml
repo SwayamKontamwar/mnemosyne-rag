@@ -4,20 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemosyne-rag"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first personal knowledge base with hybrid search and cited RAG"
 requires-python = ">=3.11"
-dependencies = ["pypdf>=5.0"]
+dependencies = [
+    "fastapi>=0.115",
+    "pypdf>=5.0",
+    "python-multipart>=0.0.12",
+    "uvicorn[standard]>=0.32",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
 mnemo = "mnemosyne.cli:main"
+mnemo-web = "mnemosyne.web:main"
 
 [tool.setuptools.packages.find]
 include = ["mnemosyne*"]
 
+[tool.setuptools.package-data]
+mnemosyne = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
