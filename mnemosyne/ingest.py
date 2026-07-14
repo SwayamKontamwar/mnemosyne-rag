@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Iterable
@@ -38,6 +41,8 @@ def parse(path: Path) -> list[SourceDocument]:
         documents: list[SourceDocument] = []
         for index, page in enumerate(reader.pages):
             text = page.extract_text() or ""
+            if not text.strip():
+                text = _ocr_pdf_page(path, index + 1)
             if text.strip():
                 documents.append(
                     SourceDocument(
@@ -51,22 +56,37 @@ def parse(path: Path) -> list[SourceDocument]:
                 )
         return documents
     if suffix == ".docx":
-        from zipfile import ZipFile
+        try:
+            from docx import Document
 
-        with ZipFile(path) as archive:
-            raw = archive.read("word/document.xml").decode("utf-8", errors="ignore")
-        text = " ".join(re.findall(r">([^<]+)<", raw))
+            document = Document(path)
+            blocks = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+            for table in document.tables:
+                blocks.extend("\t".join(cell.text.strip() for cell in row.cells) for row in table.rows)
+            text = "\n\n".join(blocks)
+        except ImportError:
+            from zipfile import ZipFile
+
+            with ZipFile(path) as archive:
+                root = ET.fromstring(archive.read("word/document.xml"))
+            paragraphs = ["".join(node.text or "" for node in paragraph.iter() if node.tag.endswith("}t")) for paragraph in root.iter() if paragraph.tag.endswith("}p")]
+            text = "\n\n".join(item for item in paragraphs if item.strip())
         return [_source_document(path, absolute, text, "docx")]
     if suffix == ".pptx":
         from zipfile import ZipFile
 
-        fragments: list[str] = []
+        documents: list[SourceDocument] = []
         with ZipFile(path) as archive:
-            for name in sorted(archive.namelist()):
+            names = [name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")]
+            names.sort(key=lambda name: int(re.search(r"slide(\d+)\.xml", name).group(1)))
+            for index, name in enumerate(names, 1):
                 if name.startswith("ppt/slides/slide") and name.endswith(".xml"):
-                    raw = archive.read(name).decode("utf-8", errors="ignore")
-                    fragments.append(" ".join(re.findall(r">([^<]+)<", raw)))
-        return [_source_document(path, absolute, "\n\n".join(fragments), "pptx")]
+                    root = ET.fromstring(archive.read(name))
+                    text = "\n".join(node.text or "" for node in root.iter() if node.tag.endswith("}t"))
+                    if text.strip():
+                        base = _source_document(path, absolute, text, "pptx")
+                        documents.append(SourceDocument(**(base.__dict__ | {"page": index})))
+        return documents
     if suffix in {".csv", ".tsv"}:
         return [_source_document(path, absolute, path.read_text(encoding="utf-8", errors="ignore"), suffix.lstrip("."))]
     if suffix == ".xlsx":
@@ -185,3 +205,30 @@ def _extract_xlsx_text(path: Path) -> str:
                 if cells:
                     rows.append("\t".join(cells))
         return "\n".join(rows)
+
+
+def _ocr_pdf_page(path: Path, page: int) -> str:
+    """OCR one scanned PDF page using local Poppler and Tesseract binaries."""
+    pdftoppm = shutil.which("pdftoppm")
+    tesseract = shutil.which("tesseract")
+    if not pdftoppm or not tesseract:
+        return ""
+    with tempfile.TemporaryDirectory(prefix="mnemo-ocr-") as temp:
+        output = Path(temp) / "page"
+        rendered = subprocess.run(
+            [pdftoppm, "-f", str(page), "-l", str(page), "-r", "200", "-png", "-singlefile", str(path), str(output)],
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        image = output.with_suffix(".png")
+        if rendered.returncode or not image.exists():
+            return ""
+        result = subprocess.run(
+            [tesseract, str(image), "stdout", "--psm", "6"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
