@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 from .config import Settings
@@ -10,6 +11,7 @@ from .providers import Embedder, Generator, HashingEmbedder, OllamaEmbedder
 from .store import KnowledgeStore
 
 REFERENCE_PATTERN = re.compile(r"\[(\d+)\]")
+DATE_PATTERN = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \d{1,2},? 20\d{2})\b", re.I)
 
 
 class KnowledgeBase:
@@ -75,6 +77,23 @@ like [1]. Prefer multiple citations when claims combine evidence. Do not invent 
 QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
         answer = generator.generate(prompt)
         validation = self._validate_citations(answer, hits)
+        self.store.log_conversation(
+            "ask",
+            query,
+            answer,
+            {
+                "citations": list(validation.cited_numbers),
+                "verdict": validation.verdict,
+                "filters": {"tag": tag, "folder": folder, "file_type": file_type},
+            },
+        )
+        self.store.log_evaluation(
+            query,
+            validation.verdict,
+            list(validation.cited_numbers),
+            list(validation.missing_numbers),
+            list(validation.unsupported_numbers),
+        )
         return answer, hits, validation
 
     def backlinks(self, document_name: str, limit: int = 10) -> list[SearchHit]:
@@ -89,6 +108,92 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
 
     def clusters(self, limit: int = 8) -> list[TopicCluster]:
         return self.store.clusters(limit)
+
+    def save_search(self, name: str, query: str, tag: str | None, folder: str | None, file_type: str | None) -> int:
+        return self.store.create_saved_search(name, query, tag, folder, file_type)
+
+    def history(self, limit: int = 50) -> list[dict]:
+        return self.store.conversation_history(limit)
+
+    def save_settings(self, payload: dict) -> dict:
+        for key, value in payload.items():
+            self.store.save_setting(key, value)
+        return self.store.load_settings()
+
+    def register_watch_folder(self, path: Path, profile: str = "local") -> tuple[int, int]:
+        absolute = path.expanduser().resolve()
+        self.store.upsert_watch_folder(str(absolute), profile)
+        return self.ingest(absolute)
+
+    def scan_watch_folders(self) -> dict:
+        results = []
+        for watch in self.store.list_watch_folders():
+            if not watch.enabled:
+                continue
+            path = Path(watch.path)
+            if path.exists():
+                indexed, skipped = self.ingest(path)
+                results.append({"path": watch.path, "indexed": indexed, "skipped": skipped, "profile": watch.profile})
+        return {"scanned": results}
+
+    def reader(self, path: str) -> dict:
+        document = next((doc for doc in self.store.list_documents() if doc["path"] == path), None)
+        return {
+            "document": document,
+            "chunks": [preview.__dict__ for preview in self.store.document_chunks(path)],
+            "related": self.related_notes(path),
+            "entities": self.entities(path),
+            "timeline": self.timeline(path),
+            "contradictions": self.contradictions(path),
+        }
+
+    def related_notes(self, path: str, limit: int = 6) -> list[dict]:
+        edges = self.graph(64)
+        related = []
+        for edge in edges:
+            if edge.source == path:
+                related.append({"path": edge.target, "weight": edge.weight, "reason": edge.reason})
+            elif edge.target == path:
+                related.append({"path": edge.source, "weight": edge.weight, "reason": edge.reason})
+        return sorted(related, key=lambda item: item["weight"], reverse=True)[:limit]
+
+    def entities(self, path: str) -> list[str]:
+        chunks = self.store.document_chunks(path)
+        text = "\n".join(chunk.text for chunk in chunks)
+        entities = set(re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text))
+        return sorted(entity for entity in entities if len(entity) > 2)[:30]
+
+    def timeline(self, path: str) -> list[dict]:
+        chunks = self.store.document_chunks(path)
+        events = []
+        for chunk in chunks:
+            for match in DATE_PATTERN.findall(chunk.text):
+                events.append({"date": match, "citation": chunk.citation, "text": chunk.text[:180]})
+        return events[:20]
+
+    def contradictions(self, path: str) -> list[dict]:
+        chunks = self.store.document_chunks(path)
+        contradictions = []
+        for chunk in chunks:
+            lowered = chunk.text.lower()
+            if " not " in f" {lowered} " or "never" in lowered or "cannot" in lowered:
+                for other in chunks:
+                    if other.chunk_id == chunk.chunk_id:
+                        continue
+                    overlap = set(re.findall(r"[a-z0-9_]+", lowered)) & set(re.findall(r"[a-z0-9_]+", other.text.lower()))
+                    if len(overlap) >= 4 and (" not " not in f" {other.text.lower()} "):
+                        contradictions.append(
+                            {
+                                "left": chunk.citation,
+                                "right": other.citation,
+                                "shared_terms": sorted(list(overlap))[:8],
+                            }
+                        )
+                        break
+        return contradictions[:10]
+
+    def backup(self) -> dict:
+        return self.store.backup_payload()
 
     def _default_embedder(self) -> Embedder:
         if self.settings.embed_provider == "ollama":
