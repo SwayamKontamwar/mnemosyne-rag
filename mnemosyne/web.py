@@ -102,7 +102,7 @@ def app_settings() -> dict:
 
 @app.post("/api/settings")
 def save_settings(request: SettingsRequest) -> dict:
-    return {"preferences": knowledge.save_settings(request.model_dump(exclude_none=True))}
+    return {"preferences": knowledge.save_settings(_dump_model(request, exclude_none=True))}
 
 
 @app.get("/api/library")
@@ -149,7 +149,10 @@ def upload_documents(files: list[UploadFile] = File(...)) -> dict:
 
 @app.post("/api/watch-folders")
 def add_watch_folder(request: WatchFolderRequest) -> dict:
-    indexed, skipped = knowledge.register_watch_folder(Path(request.path), request.profile)
+    try:
+        indexed, skipped = knowledge.register_watch_folder(Path(request.path), request.profile)
+    except FileNotFoundError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"indexed": indexed, "skipped": skipped, "watch_folders": [watch.__dict__ for watch in knowledge.store.list_watch_folders()]}
 
 
@@ -165,7 +168,7 @@ def scan_watch_folders() -> dict:
 
 @app.post("/api/search")
 def search(request: SearchRequest) -> dict:
-    knowledge.store.log_conversation("search", request.query, payload=request.model_dump())
+    knowledge.store.log_conversation("search", request.query, payload=_dump_model(request))
     hits = knowledge.search(request.query, request.limit, tag=request.tag, folder=request.folder, file_type=request.file_type)
     return {
         "query": request.query,
@@ -247,7 +250,10 @@ def chunk_preview(chunk_id: int) -> dict:
 
 @app.get("/api/reader")
 def reader(path: str) -> dict:
-    return knowledge.reader(path)
+    result = knowledge.reader(path)
+    if result["document"] is None:
+        raise HTTPException(404, "Document not found.")
+    return result
 
 
 @app.get("/api/graph")
@@ -286,6 +292,11 @@ def evaluations() -> dict:
     return knowledge.store.evaluation_summary()
 
 
+@app.get("/api/diagnostics")
+def diagnostics(limit: int = 100) -> dict:
+    return {"diagnostics": knowledge.diagnostics(limit)}
+
+
 @app.get("/api/backup")
 def backup() -> JSONResponse:
     return JSONResponse(knowledge.backup())
@@ -317,3 +328,9 @@ def _save_upload(upload: UploadFile, destination: Path) -> None:
     except Exception:
         destination.unlink(missing_ok=True)
         raise
+
+
+def _dump_model(model: BaseModel, **kwargs) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(**kwargs)
+    return model.dict(**kwargs)
