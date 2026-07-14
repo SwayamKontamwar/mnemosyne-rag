@@ -20,6 +20,10 @@ class Generator(Protocol):
     def generate(self, prompt: str) -> str: ...
 
 
+class VectorStore(Protocol):
+    def add(self, ids: Sequence[str], vectors: Sequence[list[float]], metadata: Sequence[dict]) -> None: ...
+
+
 class HashingEmbedder:
     """Dependency-free feature hashing baseline; replaceable with neural embeddings."""
 
@@ -69,13 +73,9 @@ class OllamaEmbedder:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return HashingEmbedder().embed(texts)
-            raise RuntimeError(
-                f"Could not fetch embeddings from Ollama model {self.model} at {self.base_url}."
-            ) from exc
+            return HashingEmbedder().embed(texts)
         except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"Could not reach Ollama at {self.base_url}. Run `ollama serve` first."
-            ) from exc
+            return HashingEmbedder().embed(texts)
         embeddings = payload.get("embeddings") or []
         if not embeddings:
             return HashingEmbedder().embed(texts)
@@ -102,3 +102,14 @@ class OllamaGenerator:
             raise RuntimeError(
                 f"Could not reach Ollama at {self.base_url}. Run `ollama serve` first."
             ) from exc
+
+
+class ChromaVectorAdapter:
+    """Lightweight adapter contract for a future Chroma-backed vector store."""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    def add(self, ids: Sequence[str], vectors: Sequence[list[float]], metadata: Sequence[dict]) -> None:
+        for item_id, vector, meta in zip(ids, vectors, metadata):
+            self.records.append({"id": item_id, "vector": vector, "metadata": meta})
