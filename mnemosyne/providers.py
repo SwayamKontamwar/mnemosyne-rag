@@ -46,6 +46,43 @@ class HashingEmbedder:
         return [x / norm for x in vector]
 
 
+class OllamaEmbedder:
+    def __init__(self, base_url: str, model: str, dimensions: int = 768) -> None:
+        self.base_url = base_url
+        self.model = model
+        self._dimensions = dimensions
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        body = json.dumps({"model": self.model, "input": list(texts)}).encode()
+        request = urllib.request.Request(
+            f"{self.base_url}/api/embed",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                payload = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return HashingEmbedder().embed(texts)
+            raise RuntimeError(
+                f"Could not fetch embeddings from Ollama model {self.model} at {self.base_url}."
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"Could not reach Ollama at {self.base_url}. Run `ollama serve` first."
+            ) from exc
+        embeddings = payload.get("embeddings") or []
+        if not embeddings:
+            return HashingEmbedder().embed(texts)
+        self._dimensions = len(embeddings[0])
+        return embeddings
+
+
 class OllamaGenerator:
     def __init__(self, base_url: str, model: str) -> None:
         self.base_url = base_url
@@ -65,4 +102,3 @@ class OllamaGenerator:
             raise RuntimeError(
                 f"Could not reach Ollama at {self.base_url}. Run `ollama serve` first."
             ) from exc
-
