@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
-from .models import Chunk, ChunkPreview, ConversationEntry, DocumentRecord, GraphEdge, SavedSearch, SearchHit, TopicCluster, WatchFolder
+from .models import Chunk, ChunkPreview, ConversationEntry, DocumentRecord, GraphEdge, ParseDiagnostic, SavedSearch, SearchHit, TopicCluster, WatchFolder
 
 
 class KnowledgeStore:
@@ -76,6 +76,14 @@ class KnowledgeStore:
                 cited_numbers TEXT DEFAULT '[]',
                 missing_numbers TEXT DEFAULT '[]',
                 unsupported_numbers TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS parse_diagnostics (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                level TEXT NOT NULL,
+                code TEXT NOT NULL,
+                message TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
@@ -494,7 +502,31 @@ class KnowledgeStore:
             "collections": self.list_collections(),
             "settings": self.load_settings(),
             "evaluations": self.evaluation_summary(),
+            "diagnostics": [diagnostic.__dict__ for diagnostic in self.list_diagnostics()],
         }
+
+    def log_diagnostic(self, path: str, level: str, code: str, message: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO parse_diagnostics(path, level, code, message) VALUES (?, ?, ?, ?)",
+                (path, level, code, message),
+            )
+
+    def list_diagnostics(self, limit: int = 100) -> list[ParseDiagnostic]:
+        rows = self.connection.execute(
+            "SELECT path, level, code, message, created_at FROM parse_diagnostics ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            ParseDiagnostic(
+                path=row["path"],
+                level=row["level"],
+                code=row["code"],
+                message=row["message"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     def _chunk_rows(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[sqlite3.Row]:
         filters = []
