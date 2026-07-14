@@ -45,14 +45,44 @@ mnemo serve
 
 Then open `http://127.0.0.1:8765`.
 
-`search` works without a generation model. For grounded answers, run Ollama locally:
+Mnemosyne now treats local Ollama embeddings as the default happy path. For the strongest local setup, run both an embed model and an answer model:
 
 ```bash
+ollama pull nomic-embed-text
 ollama pull qwen2.5:7b
 ollama serve
 ```
 
+The default runtime assumes:
+
+```bash
+export MNEMO_EMBED_PROVIDER=ollama
+export OLLAMA_EMBED_MODEL=nomic-embed-text
+```
+
 By default Mnemosyne stores data under `.mnemosyne/`. Set `MNEMO_HOME` to move the local database, uploads, and index.
+
+## Product surface
+
+The app now includes:
+
+- Drag-and-drop plus watch-folder ingestion
+- Tags, folders, file-type filters, and collections groundwork
+- Search history and saved searches
+- Source-reader views with chunk previews, entities, and simple timelines
+- Citation auditing and an evaluation dashboard
+- Provider and privacy preferences stored locally
+- Backup/export APIs for local data portability
+
+## One-command local run
+
+You can run the app in Docker:
+
+```bash
+docker compose up --build
+```
+
+Then open `http://127.0.0.1:8765`.
 
 ## Architecture
 
