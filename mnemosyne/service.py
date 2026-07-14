@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
+import threading
+from dataclasses import replace
 from pathlib import Path
+from zipfile import ZipFile
 
 from .config import Settings
 from .ingest import chunk_document, discover, file_digest, parse
 from .models import CitationValidation, GraphEdge, SearchHit, TopicCluster
-from .providers import Embedder, Generator, HashingEmbedder, OllamaEmbedder
+from .providers import ChromaVectorAdapter, Embedder, Generator, HashingEmbedder, OllamaEmbedder
 from .store import KnowledgeStore
 
 REFERENCE_PATTERN = re.compile(r"\[(\d+)\]")
@@ -16,9 +19,19 @@ DATE_PATTERN = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|ju
 class KnowledgeBase:
     def __init__(self, settings: Settings, embedder: Embedder | None = None) -> None:
         self.settings = settings
-        self.embedder = embedder or self._default_embedder()
         self.store = KnowledgeStore(settings.db_path)
         self.store.initialize()
+        preferences = self.store.load_settings()
+        if preferences:
+            self.settings = replace(
+                settings,
+                embed_provider=str(preferences.get("embed_provider", settings.embed_provider)),
+                embed_model=str(preferences.get("embed_model", settings.embed_model)),
+                ollama_model=str(preferences.get("ollama_model", settings.ollama_model)),
+                vector_provider=str(preferences.get("vector_provider", settings.vector_provider)),
+            )
+        self.embedder = embedder or self._default_embedder()
+        self.vector_store = self._default_vector_store()
 
     def ingest(self, source: Path) -> tuple[int, int]:
         indexed = skipped = 0
@@ -28,7 +41,11 @@ class KnowledgeBase:
             if self.store.digest_for(absolute) == digest:
                 skipped += 1
                 continue
-            documents = parse(path)
+            try:
+                documents = parse(path)
+            except Exception as exc:
+                self.store.log_diagnostic(absolute, "error", "parse_failed", f"{type(exc).__name__}: {exc}")
+                continue
             if not documents:
                 self.store.log_diagnostic(
                     absolute,
@@ -52,7 +69,7 @@ class KnowledgeBase:
                 continue
             vectors = self.embedder.embed([chunk.text for chunk in chunks])
             primary = documents[0]
-            self.store.replace_document(
+            chunk_ids = self.store.replace_document(
                 absolute,
                 digest,
                 zip(chunks, vectors),
@@ -65,11 +82,30 @@ class KnowledgeBase:
                     "links": list(primary.links),
                 },
             )
+            if self.vector_store:
+                self.vector_store.delete_document(absolute)
+                self.vector_store.add(
+                    [str(item_id) for item_id in chunk_ids],
+                    vectors,
+                    [{"document_path": absolute, "title": chunk.title, "citation": chunk.citation} for chunk in chunks],
+                )
             indexed += 1
         return indexed, skipped
 
     def search(self, query: str, limit: int = 8, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[SearchHit]:
-        dense_hits = self.store.hybrid_search(query, self.embedder.embed([query])[0], max(limit * 3, 12), tag=tag, folder=folder, file_type=file_type)
+        query_vector = self.embedder.embed([query])[0]
+        dense_hits = self.store.hybrid_search(query, query_vector, max(limit * 3, 12), tag=tag, folder=folder, file_type=file_type)
+        if self.vector_store and not any((tag, folder, file_type)):
+            chroma = self.vector_store.query(query_vector, max(limit * 3, 12))
+            chroma_hits = self.store.hits_by_ids([item_id for item_id, _ in chroma], dict(chroma))
+            merged = {hit.chunk_id: hit for hit in dense_hits}
+            for hit in chroma_hits:
+                current = merged.get(hit.chunk_id)
+                if current:
+                    merged[hit.chunk_id] = SearchHit(hit.chunk_id, hit.text, hit.title, hit.citation, max(current.score, hit.score), hit.tags)
+                else:
+                    merged[hit.chunk_id] = hit
+            dense_hits = list(merged.values())
         reranked = self._rerank(query, dense_hits)
         return reranked[:limit]
 
@@ -90,6 +126,19 @@ like [1]. Prefer multiple citations when claims combine evidence. Do not invent 
 QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
         answer = generator.generate(prompt)
         validation = self._validate_citations(answer, hits)
+        if hits and validation.verdict != "grounded":
+            repair_prompt = f"""Revise the draft so every factual paragraph or bullet ends with one or more valid bracketed citations.
+Use only source numbers 1 through {len(hits)}. Remove unsupported claims and never invent a source.
+
+QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:"""
+            repaired = generator.generate(repair_prompt)
+            repaired_validation = self._validate_citations(repaired, hits)
+            if repaired_validation.verdict == "grounded":
+                answer, validation = repaired, repaired_validation
+            else:
+                excerpt = " ".join(hits[0].text.split())[:600].rstrip(" .!?")
+                answer = f"{excerpt} [1]."
+                validation = self._validate_citations(answer, hits)
         self.store.log_conversation(
             "ask",
             query,
@@ -131,7 +180,21 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
     def save_settings(self, payload: dict) -> dict:
         for key, value in payload.items():
             self.store.save_setting(key, value)
-        return self.store.load_settings()
+        preferences = self.store.load_settings()
+        self.configure(preferences)
+        return preferences
+
+    def configure(self, preferences: dict | None = None) -> None:
+        preferences = preferences or self.store.load_settings()
+        self.settings = replace(
+            self.settings,
+            embed_provider=str(preferences.get("embed_provider", self.settings.embed_provider)),
+            embed_model=str(preferences.get("embed_model", self.settings.embed_model)),
+            ollama_model=str(preferences.get("ollama_model", self.settings.ollama_model)),
+            vector_provider=str(preferences.get("vector_provider", self.settings.vector_provider)),
+        )
+        self.embedder = self._default_embedder()
+        self.vector_store = self._default_vector_store()
 
     def register_watch_folder(self, path: Path, profile: str = "local") -> tuple[int, int]:
         absolute = path.expanduser().resolve()
@@ -148,8 +211,35 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
             path = Path(watch.path)
             if path.exists():
                 indexed, skipped = self.ingest(path)
-                results.append({"path": watch.path, "indexed": indexed, "skipped": skipped, "profile": watch.profile})
+                present = {str(item.resolve()) for item in discover(path)}
+                removed = 0
+                for stored_path in self.store.document_paths_below(str(path)):
+                    if stored_path not in present:
+                        self.store.remove_document(stored_path)
+                        if self.vector_store:
+                            self.vector_store.delete_document(stored_path)
+                        removed += 1
+                results.append({"path": watch.path, "indexed": indexed, "skipped": skipped, "removed": removed, "profile": watch.profile})
         return {"scanned": results}
+
+    def watch_forever(self, stop_event: threading.Event | None = None, interval: float | None = None) -> None:
+        stop_event = stop_event or threading.Event()
+        delay = interval if interval is not None else self.settings.watch_interval
+        while not stop_event.wait(max(0.25, delay)):
+            self.scan_watch_folders()
+
+    def import_archive(self, archive: Path, profile: str = "notion") -> tuple[int, int]:
+        destination = self.settings.home / "imports" / archive.stem
+        destination.mkdir(parents=True, exist_ok=True)
+        with ZipFile(archive) as bundle:
+            root = destination.resolve()
+            for member in bundle.infolist():
+                target = (destination / member.filename).resolve()
+                if root not in target.parents and target != root:
+                    raise ValueError("Archive contains an unsafe path.")
+            bundle.extractall(destination)
+        self.store.upsert_watch_folder(str(destination.resolve()), profile)
+        return self.ingest(destination)
 
     def reader(self, path: str) -> dict:
         document = next((doc for doc in self.store.list_documents() if doc["path"] == path), None)
@@ -188,15 +278,16 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
 
     def contradictions(self, path: str) -> list[dict]:
         chunks = self.store.document_chunks(path)
+        other_chunks = self.store.all_chunk_previews(exclude_path=path)
         contradictions = []
         for chunk in chunks:
             lowered = chunk.text.lower()
-            if " not " in f" {lowered} " or "never" in lowered or "cannot" in lowered:
-                for other in chunks:
-                    if other.chunk_id == chunk.chunk_id:
-                        continue
+            left_negative = self._is_negative(lowered)
+            for other in other_chunks:
+                right_negative = self._is_negative(other.text.lower())
+                if left_negative != right_negative:
                     overlap = set(re.findall(r"[a-z0-9_]+", lowered)) & set(re.findall(r"[a-z0-9_]+", other.text.lower()))
-                    if len(overlap) >= 4 and (" not " not in f" {other.text.lower()} "):
+                    if len(overlap) >= 4:
                         contradictions.append(
                             {
                                 "left": chunk.citation,
@@ -206,6 +297,25 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
                         )
                         break
         return contradictions[:10]
+
+    def compare(self, left: str, right: str) -> dict:
+        left_chunks = self.store.document_chunks(left)
+        right_chunks = self.store.document_chunks(right)
+        if not left_chunks or not right_chunks:
+            raise ValueError("Both documents must exist in the library.")
+        left_terms = self._meaningful_terms(" ".join(chunk.text for chunk in left_chunks))
+        right_terms = self._meaningful_terms(" ".join(chunk.text for chunk in right_chunks))
+        shared = sorted(left_terms & right_terms)
+        union = left_terms | right_terms
+        return {
+            "left": left,
+            "right": right,
+            "similarity": len(shared) / max(1, len(union)),
+            "shared_topics": shared[:30],
+            "left_only": sorted(left_terms - right_terms)[:30],
+            "right_only": sorted(right_terms - left_terms)[:30],
+            "contradictions": self.contradictions(left),
+        }
 
     def backup(self) -> dict:
         return self.store.backup_payload()
@@ -217,6 +327,30 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
         if self.settings.embed_provider == "ollama":
             return OllamaEmbedder(self.settings.ollama_url, self.settings.embed_model)
         return HashingEmbedder()
+
+    def _default_vector_store(self) -> ChromaVectorAdapter | None:
+        if self.settings.vector_provider == "chroma":
+            return ChromaVectorAdapter(self.settings.home / "chroma")
+        return None
+
+    def provider_status(self) -> dict:
+        return {
+            "embed_provider": self.settings.embed_provider,
+            "embed_model": self.settings.embed_model,
+            "embed_backend": getattr(self.embedder, "last_backend", "hash"),
+            "embed_error": getattr(self.embedder, "last_error", None),
+            "vector_provider": self.settings.vector_provider,
+            "ollama_model": self.settings.ollama_model,
+        }
+
+    @staticmethod
+    def _is_negative(text: str) -> bool:
+        return bool(re.search(r"\b(no|not|never|cannot|can't|isn't|wasn't|won't|false|incorrect)\b", text))
+
+    @staticmethod
+    def _meaningful_terms(text: str) -> set[str]:
+        stop = {"the", "and", "that", "this", "with", "from", "have", "were", "was", "for", "are", "but", "not", "into", "your"}
+        return {token for token in re.findall(r"[a-z0-9_]+", text.lower()) if len(token) > 3 and token not in stop}
 
     def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
         terms = set(re.findall(r"[a-z0-9_]+", query.lower()))
@@ -245,7 +379,8 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
         available = {index for index, _ in enumerate(hits, 1)}
         missing = tuple(number for number in cited_numbers if number not in available)
         unsupported: list[int] = []
-        sentences = [sentence.strip().lower() for sentence in re.split(r"(?<=[.!?])\s+", answer) if sentence.strip()]
+        normalized_answer = re.sub(r"([.!?])\s+(\[\d+\])", r" \2\1", answer)
+        sentences = [sentence.strip().lower() for sentence in re.split(r"(?<=[.!?])\s+", normalized_answer) if sentence.strip()]
         for number in cited_numbers:
             if number not in available:
                 continue
