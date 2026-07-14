@@ -1,9 +1,9 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 from mnemosyne.config import Settings
-from mnemosyne.ingest import chunk_document
-from mnemosyne.models import SearchHit
-from mnemosyne.models import SourceDocument
+from mnemosyne.ingest import chunk_document, parse
+from mnemosyne.models import SearchHit, SourceDocument
 from mnemosyne.service import KnowledgeBase
 
 
@@ -104,6 +104,7 @@ def test_saved_searches_watch_folders_and_backup(tmp_path: Path):
     assert backup["saved_searches"]
     assert backup["watch_folders"]
     assert backup["documents"]
+    assert "diagnostics" in backup
 
 
 def test_reader_and_entities(tmp_path: Path):
@@ -117,3 +118,55 @@ def test_reader_and_entities(tmp_path: Path):
     assert reader["chunks"]
     assert reader["entities"]
     assert reader["timeline"]
+
+
+def test_empty_file_logs_parsing_diagnostic(tmp_path: Path):
+    note = tmp_path / "empty.md"
+    note.write_text("")
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db")
+    kb = KnowledgeBase(settings)
+
+    assert kb.ingest(note) == (0, 0)
+    diagnostics = kb.diagnostics()
+    assert diagnostics
+    assert diagnostics[0]["code"] == "empty_chunks"
+
+
+def test_missing_watch_folder_is_rejected(tmp_path: Path):
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db")
+    kb = KnowledgeBase(settings)
+    missing = tmp_path / "does-not-exist"
+
+    try:
+        kb.register_watch_folder(missing)
+    except FileNotFoundError as exc:
+        assert str(missing) in str(exc)
+    else:
+        raise AssertionError("missing watch folder should fail")
+
+
+def test_xlsx_parser_extracts_shared_strings(tmp_path: Path):
+    workbook = tmp_path / "sheet.xlsx"
+    with ZipFile(workbook, "w") as archive:
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Hybrid retrieval</t></si>
+              <si><t>Citation audit</t></si>
+            </sst>""",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row>
+              </sheetData>
+            </worksheet>""",
+        )
+
+    docs = parse(workbook)
+    assert docs
+    assert "Hybrid retrieval" in docs[0].text
+    assert "Citation audit" in docs[0].text
