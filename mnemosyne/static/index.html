@@ -78,13 +78,23 @@
           <div id="connections" class="drop-panel" data-section="connections">
             <div class="section-heading"><div><p class="eyebrow">ADD KNOWLEDGE</p><h2>Drop something in</h2></div></div>
             <label id="drop-zone" class="drop-zone">
-              <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf">
+              <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.csv,.tsv,.xlsx">
               <span class="drop-icon">↓</span>
               <strong>Drop files here</strong>
               <span>or click to choose</span>
-              <small>Markdown, text, and PDF for now</small>
+              <small>Markdown, text, PDF, Office docs, and spreadsheet sources</small>
             </label>
             <div id="upload-status" class="upload-status" aria-live="polite"></div>
+            <div class="watcher-form">
+              <input id="watch-path" type="text" placeholder="Register a local folder to watch">
+              <select id="watch-profile">
+                <option value="local">Local</option>
+                <option value="obsidian">Obsidian</option>
+                <option value="notion">Notion export</option>
+              </select>
+              <button id="watch-submit" class="quiet-button" type="button">Add watch folder</button>
+            </div>
+            <div id="watch-folders" class="watch-list"></div>
           </div>
         </section>
 
@@ -105,9 +115,48 @@
           </div>
         </section>
 
+        <section class="insight-grid">
+          <div class="graph-panel">
+            <div class="section-heading"><div><p class="eyebrow">SAVED SEARCHES</p><h2>Reusable retrievals</h2></div></div>
+            <form id="saved-search-form" class="inline-form">
+              <input id="saved-search-name" type="text" placeholder="Search name" required>
+              <button type="submit">Save current search</button>
+            </form>
+            <div id="saved-searches" class="graph-list"><p class="empty-state">Saved searches will appear here.</p></div>
+          </div>
+
+          <div class="cluster-panel">
+            <div class="section-heading"><div><p class="eyebrow">EVALUATION DASHBOARD</p><h2>Grounding health</h2></div></div>
+            <div id="evaluation-dashboard" class="cluster-list"><p class="empty-state">Run searches and asks to build evaluation history.</p></div>
+          </div>
+        </section>
+
+        <section class="insight-grid">
+          <div class="graph-panel">
+            <div class="section-heading"><div><p class="eyebrow">CONVERSATION HISTORY</p><h2>Recent retrieval activity</h2></div></div>
+            <div id="history" class="graph-list"><p class="empty-state">Search and ask history will appear here.</p></div>
+          </div>
+
+          <div class="cluster-panel">
+            <div class="section-heading"><div><p class="eyebrow">PROVIDER SETTINGS</p><h2>Local defaults</h2></div></div>
+            <form id="settings-form" class="settings-form">
+              <label><span>Embedding provider</span><select id="setting-embed-provider"><option value="ollama">Ollama</option><option value="hash">Hash fallback</option></select></label>
+              <label><span>Embedding model</span><input id="setting-embed-model" type="text" placeholder="nomic-embed-text"></label>
+              <label><span>Answer model</span><input id="setting-ollama-model" type="text" placeholder="qwen2.5:7b"></label>
+              <label><span>Privacy mode</span><select id="setting-privacy-mode"><option value="local-first">Local first</option><option value="strict-local">Strict local</option></select></label>
+              <button type="submit">Save settings</button>
+            </form>
+          </div>
+        </section>
+
         <section id="preview-panel" class="preview-panel" hidden>
           <div class="section-heading"><div><p class="eyebrow">CITATION PREVIEW</p><h2 id="preview-title">Source chunk</h2></div></div>
           <div id="preview-body" class="preview-body"></div>
+        </section>
+
+        <section id="reader-panel" class="preview-panel" hidden>
+          <div class="section-heading"><div><p class="eyebrow">SOURCE READER</p><h2 id="reader-title">Document reader</h2></div></div>
+          <div id="reader-body" class="preview-body"></div>
         </section>
       </div>
     </main>
