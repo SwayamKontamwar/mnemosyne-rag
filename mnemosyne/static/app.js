@@ -1,6 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
-const state = { tag: '', folder: '', fileType: '' };
+const state = { tag: '', folder: '', fileType: '', lastQuery: '' };
+
 const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
 }[char]));
@@ -14,9 +15,9 @@ async function request(url, options = {}) {
 
 function currentFilters() {
   return {
-    tag: $('#tag-filter').value || null,
-    folder: $('#folder-filter').value || null,
-    file_type: $('#type-filter').value || null
+    tag: $('#tag-filter')?.value || null,
+    folder: $('#folder-filter')?.value || null,
+    file_type: $('#type-filter')?.value || null
   };
 }
 
@@ -32,13 +33,15 @@ async function loadLibrary() {
     `${stats.documents} source${stats.documents === 1 ? '' : 's'}`,
     `${stats.chunks} searchable passages`,
     `${Math.round(stats.characters / 1000)}k characters`,
-    `${stats.tags} total tags`
+    `${stats.tags} total tags`,
+    `${stats.saved_searches} saved searches`,
+    `${stats.watch_folders} watch folders`
   ].map((value) => `<span class="stat">${escapeHtml(value)}</span>`).join('');
   hydrateFilter($('#tag-filter'), filters.tags, state.tag, 'All tags');
   hydrateFilter($('#folder-filter'), filters.folders, state.folder, 'All folders');
   hydrateFilter($('#type-filter'), filters.types, state.fileType, 'All types');
   $('#documents').innerHTML = documents.length ? documents.map((doc) => `
-    <article class="document-row">
+    <article class="document-row" data-document-path="${escapeHtml(doc.path)}">
       <span class="file-icon">${escapeHtml(doc.type)}</span>
       <div>
         <strong title="${escapeHtml(doc.name)}">${escapeHtml(doc.name)}</strong>
@@ -59,13 +62,14 @@ async function uploadFiles(files) {
     const data = await request('/api/documents', { method: 'POST', body: form });
     const rejected = data.rejected.length ? ` ${data.rejected.length} unsupported.` : '';
     status.textContent = `Added ${data.indexed.length} source${data.indexed.length === 1 ? '' : 's'}.${rejected}`;
-    await loadLibrary();
+    await refreshAll();
   } catch (error) {
     status.textContent = error.message;
   }
 }
 
 async function runSearch(query) {
+  state.lastQuery = query;
   const panel = $('#search-results');
   panel.hidden = false;
   $('#results-title').textContent = `Results for “${query}”`;
@@ -73,103 +77,26 @@ async function runSearch(query) {
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   try {
     const data = await request('/api/search', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, ...currentFilters() })
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, ...currentFilters() })
     });
     $('#results').innerHTML = data.results.length ? data.results.map((hit) => `
-        <article class="result" data-chunk-id="${hit.id}">
+      <article class="result" data-chunk-id="${hit.id}">
         <div class="result-head"><strong>${escapeHtml(hit.title)}</strong><span>${Math.max(0, Math.round(hit.score * 100))}% match</span></div>
         <p>${escapeHtml(hit.text.slice(0, 520))}${hit.text.length > 520 ? '…' : ''}</p>
         <div class="tag-row">${(hit.tags || []).map((tag) => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</div>
         <div class="citation">${escapeHtml(hit.citation)}</div>
         <button class="preview-link" data-chunk-id="${hit.id}">Open cited chunk</button>
       </article>`).join('') : '<p class="empty-state">No matching passages found.</p>';
+    await loadHistory();
   } catch (error) {
     $('#results').innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
   }
 }
 
-$('#global-search').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && event.currentTarget.value.trim()) runSearch(event.currentTarget.value.trim());
-});
-
-document.addEventListener('keydown', (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-    event.preventDefault(); $('#global-search').focus();
-  }
-});
-
-$('#ask-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const query = $('#ask-input').value.trim();
-  const output = $('#answer');
-  output.hidden = false;
-  output.innerHTML = '<p>Reading your sources…</p>';
-  try {
-    const data = await request('/api/ask', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, ...currentFilters() })
-    });
-    output.innerHTML = `<div class="validation-strip ${escapeHtml(data.validation.verdict)}">
-      <strong>${escapeHtml(validationLabel(data.validation.verdict))}</strong>
-      <span>${escapeHtml(validationDetail(data.validation))}</span>
-    </div>
-    <h3>Answer</h3><p>${escapeHtml(data.answer).replace(/\n/g, '<br>')}</p><div class="sources">${data.sources.map((source) => `
-      <div class="source"><strong>[${source.number}] ${escapeHtml(source.title)}</strong><div class="citation">${escapeHtml(source.citation)}</div><button class="preview-link" data-chunk-id="${source.chunk_id}">Preview source</button></div>`).join('')}</div>`;
-  } catch (error) {
-    output.innerHTML = `<h3>Couldn’t answer yet</h3><p>${escapeHtml(error.message)}</p>`;
-  }
-});
-
-const dropZone = $('#drop-zone');
-['dragenter', 'dragover'].forEach((name) => dropZone.addEventListener(name, (event) => {
-  event.preventDefault(); dropZone.classList.add('dragging');
-}));
-['dragleave', 'drop'].forEach((name) => dropZone.addEventListener(name, (event) => {
-  event.preventDefault(); dropZone.classList.remove('dragging');
-}));
-dropZone.addEventListener('drop', (event) => uploadFiles(event.dataTransfer.files));
-$('#file-input').addEventListener('change', (event) => uploadFiles(event.target.files));
-$('#refresh-library').addEventListener('click', loadLibrary);
-$('.mobile-menu').addEventListener('click', () => $('.sidebar').classList.toggle('open'));
-$$('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.view)));
-['tag-filter', 'folder-filter', 'type-filter'].forEach((id) => {
-  $(`#${id}`).addEventListener('change', async () => {
-    state.tag = $('#tag-filter').value;
-    state.folder = $('#folder-filter').value;
-    state.fileType = $('#type-filter').value;
-    await loadLibrary();
-    await loadInsights();
-  });
-});
-document.addEventListener('click', async (event) => {
-  const previewButton = event.target.closest('.preview-link');
-  if (previewButton) await showPreview(previewButton.dataset.chunkId);
-  const tagChip = event.target.closest('.tag-chip');
-  if (tagChip) {
-    state.tag = tagChip.dataset.tag;
-    $('#tag-filter').value = state.tag;
-    await loadLibrary();
-    await runSearch($('#global-search').value.trim() || state.tag);
-  }
-});
-
-Promise.all([loadLibrary(), loadInsights()]).catch((error) => { $('#documents').innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`; });
-
-function navigate(view) {
-  $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
-  if (view === 'search') {
-    $('#global-search').focus();
-    $('#search-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } else {
-    $(`[data-section="${view}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-  $('.sidebar').classList.remove('open');
-}
-
 async function loadInsights() {
-  const [graph, clusters] = await Promise.all([
-    request('/api/graph'),
-    request('/api/clusters')
-  ]);
+  const [graph, clusters] = await Promise.all([request('/api/graph'), request('/api/clusters')]);
   $('#graph').innerHTML = graph.edges.length ? graph.edges.map((edge) => `
     <article class="graph-edge">
       <div><strong>${escapeHtml(shortName(edge.source))}</strong><span>→</span><strong>${escapeHtml(shortName(edge.target))}</strong></div>
@@ -183,6 +110,58 @@ async function loadInsights() {
     </article>`).join('') : '<p class="empty-state">Clusters will appear as your notes gain stronger themes.</p>';
 }
 
+async function loadSavedSearches() {
+  const data = await request('/api/saved-searches');
+  $('#saved-searches').innerHTML = data.saved_searches.length ? data.saved_searches.map((search) => `
+    <article class="graph-edge">
+      <div><strong>${escapeHtml(search.name)}</strong></div>
+      <small>${escapeHtml(search.query)}</small>
+      <button class="preview-link run-saved-search"
+        data-query="${escapeHtml(search.query)}"
+        data-tag="${escapeHtml(search.tag || '')}"
+        data-folder="${escapeHtml(search.folder || '')}"
+        data-type="${escapeHtml(search.file_type || '')}">Run search</button>
+    </article>`).join('') : '<p class="empty-state">Saved searches will appear here.</p>';
+}
+
+async function loadHistory() {
+  const data = await request('/api/history');
+  $('#history').innerHTML = data.history.length ? data.history.map((entry) => `
+    <article class="graph-edge">
+      <div><strong>${escapeHtml(entry.mode.toUpperCase())}</strong></div>
+      <small>${escapeHtml(entry.query)}</small>
+    </article>`).join('') : '<p class="empty-state">Recent activity will appear here.</p>';
+}
+
+async function loadEvaluations() {
+  const data = await request('/api/evaluations');
+  const counts = Object.entries(data.counts || {});
+  $('#evaluation-dashboard').innerHTML = counts.length ? `
+    <div class="stats">${counts.map(([key, value]) => `<span class="stat">${escapeHtml(key)}: ${value}</span>`).join('')}</div>
+    <div class="graph-list">${(data.recent || []).map((item) => `
+      <article class="graph-edge">
+        <div><strong>${escapeHtml(item.verdict)}</strong></div>
+        <small>${escapeHtml(item.query)}</small>
+      </article>`).join('')}</div>` : '<p class="empty-state">Run asks to build evaluation history.</p>';
+}
+
+async function loadWatchFolders() {
+  const data = await request('/api/watch-folders');
+  $('#watch-folders').innerHTML = data.watch_folders.length ? data.watch_folders.map((watch) => `
+    <article class="graph-edge">
+      <div><strong>${escapeHtml(shortName(watch.path))}</strong></div>
+      <small>${escapeHtml(watch.profile)} · ${escapeHtml(watch.path)}</small>
+    </article>`).join('') : '<p class="empty-state">No watch folders registered yet.</p>';
+}
+
+async function loadSettings() {
+  const data = await request('/api/settings');
+  $('#setting-embed-provider').value = data.preferences.embed_provider || data.runtime.embed_provider;
+  $('#setting-embed-model').value = data.preferences.embed_model || data.runtime.embed_model;
+  $('#setting-ollama-model').value = data.preferences.ollama_model || data.runtime.ollama_model;
+  $('#setting-privacy-mode').value = data.preferences.privacy_mode || 'local-first';
+}
+
 async function showPreview(chunkId) {
   const data = await request(`/api/chunks/${chunkId}`);
   $('#preview-panel').hidden = false;
@@ -194,6 +173,35 @@ async function showPreview(chunkId) {
     </div>
     <pre>${escapeHtml(data.text)}</pre>`;
   $('#preview-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function showReader(path) {
+  const data = await request(`/api/reader?path=${encodeURIComponent(path)}`);
+  $('#reader-panel').hidden = false;
+  $('#reader-title').textContent = data.document?.title || shortName(path);
+  $('#reader-body').innerHTML = `
+    <div class="preview-meta">${(data.document?.tags || []).map((tag) => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</div>
+    <div class="reader-grid">
+      <div>${(data.chunks || []).map((chunk) => `
+        <article class="reader-chunk">
+          <div class="citation">${escapeHtml(chunk.citation)}</div>
+          <pre>${escapeHtml(chunk.text)}</pre>
+        </article>`).join('')}</div>
+      <aside>
+        <h4>Related notes</h4>
+        <div class="graph-list">${(data.related || []).map((item) => `
+          <article class="graph-edge"><div><strong>${escapeHtml(shortName(item.path))}</strong></div><small>${Math.round(item.weight * 100)}% · ${escapeHtml(item.reason)}</small></article>`).join('') || '<p class="empty-state">No related notes yet.</p>'}</div>
+        <h4>Entities</h4>
+        <div class="tag-row">${(data.entities || []).map((entity) => `<span class="mini-tag">${escapeHtml(entity)}</span>`).join('')}</div>
+        <h4>Timeline</h4>
+        <div class="graph-list">${(data.timeline || []).map((item) => `
+          <article class="graph-edge"><div><strong>${escapeHtml(item.date)}</strong></div><small>${escapeHtml(item.citation)}</small></article>`).join('') || '<p class="empty-state">No date signals found.</p>'}</div>
+        <h4>Contradictions</h4>
+        <div class="graph-list">${(data.contradictions || []).map((item) => `
+          <article class="graph-edge"><div><strong>${escapeHtml(item.left)}</strong></div><small>${escapeHtml(item.right)} · ${escapeHtml(item.shared_terms.join(', '))}</small></article>`).join('') || '<p class="empty-state">No contradiction candidates found.</p>'}</div>
+      </aside>
+    </div>`;
+  $('#reader-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function shortName(path) {
@@ -222,3 +230,148 @@ function validationDetail(validation) {
   if (validation.verdict === 'weak-support') return `Potentially weak support for source numbers: ${validation.unsupported_numbers.join(', ')}.`;
   return 'The answer audit needs review.';
 }
+
+async function refreshAll() {
+  await Promise.all([loadLibrary(), loadInsights(), loadSavedSearches(), loadHistory(), loadEvaluations(), loadWatchFolders(), loadSettings()]);
+}
+
+$('#global-search').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && event.currentTarget.value.trim()) runSearch(event.currentTarget.value.trim());
+});
+
+document.addEventListener('keydown', (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    $('#global-search').focus();
+  }
+});
+
+$('#ask-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const query = $('#ask-input').value.trim();
+  const output = $('#answer');
+  output.hidden = false;
+  output.innerHTML = '<p>Reading your sources…</p>';
+  try {
+    const data = await request('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, ...currentFilters() })
+    });
+    output.innerHTML = `<div class="validation-strip ${escapeHtml(data.validation.verdict)}"><strong>${escapeHtml(validationLabel(data.validation.verdict))}</strong><span>${escapeHtml(validationDetail(data.validation))}</span></div>
+    <h3>Answer</h3><p>${escapeHtml(data.answer).replace(/\n/g, '<br>')}</p><div class="sources">${data.sources.map((source) => `
+      <div class="source"><strong>[${source.number}] ${escapeHtml(source.title)}</strong><div class="citation">${escapeHtml(source.citation)}</div><button class="preview-link" data-chunk-id="${source.chunk_id}">Preview source</button></div>`).join('')}</div>`;
+    await Promise.all([loadEvaluations(), loadHistory()]);
+  } catch (error) {
+    output.innerHTML = `<h3>Couldn’t answer yet</h3><p>${escapeHtml(error.message)}</p>`;
+  }
+});
+
+const dropZone = $('#drop-zone');
+['dragenter', 'dragover'].forEach((name) => dropZone.addEventListener(name, (event) => {
+  event.preventDefault();
+  dropZone.classList.add('dragging');
+}));
+['dragleave', 'drop'].forEach((name) => dropZone.addEventListener(name, (event) => {
+  event.preventDefault();
+  dropZone.classList.remove('dragging');
+}));
+dropZone.addEventListener('drop', (event) => uploadFiles(event.dataTransfer.files));
+$('#file-input').addEventListener('change', (event) => uploadFiles(event.target.files));
+$('#refresh-library').addEventListener('click', refreshAll);
+$('.mobile-menu').addEventListener('click', () => $('.sidebar').classList.toggle('open'));
+$$('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.view)));
+['tag-filter', 'folder-filter', 'type-filter'].forEach((id) => {
+  $(`#${id}`).addEventListener('change', async () => {
+    state.tag = $('#tag-filter').value;
+    state.folder = $('#folder-filter').value;
+    state.fileType = $('#type-filter').value;
+    await Promise.all([loadLibrary(), loadInsights()]);
+  });
+});
+
+document.addEventListener('click', async (event) => {
+  const previewButton = event.target.closest('.preview-link');
+  if (previewButton) await showPreview(previewButton.dataset.chunkId);
+
+  const tagChip = event.target.closest('.tag-chip');
+  if (tagChip) {
+    state.tag = tagChip.dataset.tag;
+    $('#tag-filter').value = state.tag;
+    await loadLibrary();
+    await runSearch($('#global-search').value.trim() || state.tag);
+  }
+
+  const saved = event.target.closest('.run-saved-search');
+  if (saved) {
+    state.tag = saved.dataset.tag;
+    state.folder = saved.dataset.folder;
+    state.fileType = saved.dataset.type;
+    $('#tag-filter').value = state.tag;
+    $('#folder-filter').value = state.folder;
+    $('#type-filter').value = state.fileType;
+    await loadLibrary();
+    await runSearch(saved.dataset.query);
+  }
+
+  const documentRow = event.target.closest('.document-row');
+  if (documentRow && !event.target.closest('.tag-chip')) {
+    await showReader(documentRow.dataset.documentPath);
+  }
+});
+
+$('#saved-search-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const name = $('#saved-search-name').value.trim();
+  const query = state.lastQuery || $('#global-search').value.trim();
+  if (!name || !query) return;
+  await request('/api/saved-searches', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, query, ...currentFilters() })
+  });
+  $('#saved-search-name').value = '';
+  await loadSavedSearches();
+});
+
+$('#watch-submit').addEventListener('click', async () => {
+  const path = $('#watch-path').value.trim();
+  if (!path) return;
+  await request('/api/watch-folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, profile: $('#watch-profile').value })
+  });
+  $('#watch-path').value = '';
+  await refreshAll();
+});
+
+$('#settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await request('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      embed_provider: $('#setting-embed-provider').value,
+      embed_model: $('#setting-embed-model').value.trim(),
+      ollama_model: $('#setting-ollama-model').value.trim(),
+      privacy_mode: $('#setting-privacy-mode').value
+    })
+  });
+  await loadSettings();
+});
+
+function navigate(view) {
+  $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
+  if (view === 'search') {
+    $('#global-search').focus();
+    $('#search-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    $(`[data-section="${view}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  $('.sidebar').classList.remove('open');
+}
+
+refreshAll().catch((error) => {
+  $('#documents').innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+});
