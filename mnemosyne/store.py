@@ -80,8 +80,27 @@ class KnowledgeStore:
             "SELECT * FROM chunks WHERE document_path LIKE ? OR title = ?", (f"%{name}%", name)
         ).fetchall()
 
+    def list_documents(self) -> list[dict]:
+        rows = self.connection.execute(
+            """
+            SELECT d.path, d.digest, d.indexed_at, COUNT(c.id) chunk_count,
+                   COALESCE(SUM(LENGTH(c.text)), 0) character_count
+            FROM documents d LEFT JOIN chunks c ON c.document_path = d.path
+            GROUP BY d.path, d.digest, d.indexed_at
+            ORDER BY d.indexed_at DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def stats(self) -> dict[str, int]:
+        documents = self.connection.execute("SELECT COUNT(*) count FROM documents").fetchone()["count"]
+        chunks = self.connection.execute("SELECT COUNT(*) count FROM chunks").fetchone()["count"]
+        characters = self.connection.execute(
+            "SELECT COALESCE(SUM(LENGTH(text)), 0) count FROM chunks"
+        ).fetchone()["count"]
+        return {"documents": documents, "chunks": chunks, "characters": characters}
+
 
 def _cosine(left: list[float], right: list[float]) -> float:
     denominator = math.sqrt(sum(x*x for x in left)) * math.sqrt(sum(x*x for x in right))
     return sum(a*b for a, b in zip(left, right)) / denominator if denominator else 0.0
-
