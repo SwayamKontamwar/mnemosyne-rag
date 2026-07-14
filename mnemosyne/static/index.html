@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A private, local-first home for your notes and documents.">
+  <title>Mnemosyne — Personal knowledge, recalled</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Mnemosyne home">
+        <span class="brand-mark">M</span>
+        <span>Mnemosyne</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" data-view="home"><span>⌂</span>Home</button>
+        <button class="nav-item" data-view="library"><span>▤</span>Library</button>
+        <button class="nav-item" data-view="search"><span>⌕</span>Search</button>
+        <button class="nav-item" data-view="connections"><span>⌘</span>Connections</button>
+      </nav>
+      <div class="privacy-card">
+        <span class="status-dot"></span>
+        <div><strong>Private by default</strong><small>Stored and searched locally</small></div>
+      </div>
+      <button class="settings-button">⚙ <span>Settings</span></button>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <button class="mobile-menu" aria-label="Open navigation">☰</button>
+        <div class="top-search">
+          <span>⌕</span>
+          <input id="global-search" type="search" placeholder="Search everything…" autocomplete="off">
+          <kbd>⌘ K</kbd>
+        </div>
+        <div class="model-state"><span></span>Local model</div>
+      </header>
+
+      <div class="content">
+        <section id="home" class="hero" data-section="home">
+          <p class="eyebrow">YOUR PRIVATE KNOWLEDGE SPACE</p>
+          <h1>Everything you know,<br><em>ready when you need it.</em></h1>
+          <p class="hero-copy">Bring together your notes, research, and documents. Find exact passages or ask questions and get answers grounded in your own sources.</p>
+        </section>
+
+        <section class="ask-panel" aria-labelledby="ask-heading">
+          <div class="ask-heading-row">
+            <div><span class="spark">✦</span><div><h2 id="ask-heading">Ask your knowledge</h2><p>Answers include references to your original sources.</p></div></div>
+            <span class="local-pill">LOCAL</span>
+          </div>
+          <form id="ask-form">
+            <textarea id="ask-input" rows="3" placeholder="What have I written about…" required></textarea>
+            <div class="ask-actions">
+              <span id="ask-hint">Try “Summarize my notes on retrieval”</span>
+              <button type="submit">Ask <span>→</span></button>
+            </div>
+          </form>
+          <div id="answer" class="answer" hidden></div>
+        </section>
+
+        <section class="workspace-grid">
+          <div id="library" class="library-panel" data-section="library">
+            <div class="section-heading">
+              <div><p class="eyebrow">KNOWLEDGE LIBRARY</p><h2>Your sources</h2></div>
+              <button id="refresh-library" class="quiet-button">Refresh</button>
+            </div>
+            <div id="stats" class="stats" aria-label="Library statistics"></div>
+            <div id="documents" class="documents"><p class="empty-state">Your library is empty. Add your first source to begin.</p></div>
+          </div>
+
+          <div id="connections" class="drop-panel" data-section="connections">
+            <div class="section-heading"><div><p class="eyebrow">ADD KNOWLEDGE</p><h2>Drop something in</h2></div></div>
+            <label id="drop-zone" class="drop-zone">
+              <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf">
+              <span class="drop-icon">↓</span>
+              <strong>Drop files here</strong>
+              <span>or click to choose</span>
+              <small>Markdown, text, and PDF for now</small>
+            </label>
+            <div id="upload-status" class="upload-status" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section id="search-results" class="results-panel" data-section="search" hidden>
+          <div class="section-heading"><div><p class="eyebrow">SEARCH RESULTS</p><h2 id="results-title">Matching passages</h2></div></div>
+          <div id="results"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
