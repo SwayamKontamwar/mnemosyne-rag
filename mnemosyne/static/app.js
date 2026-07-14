@@ -158,8 +158,31 @@ async function loadSettings() {
   const data = await request('/api/settings');
   $('#setting-embed-provider').value = data.preferences.embed_provider || data.runtime.embed_provider;
   $('#setting-embed-model').value = data.preferences.embed_model || data.runtime.embed_model;
+  $('#setting-vector-provider').value = data.preferences.vector_provider || data.runtime.vector_provider || 'sqlite';
   $('#setting-ollama-model').value = data.preferences.ollama_model || data.runtime.ollama_model;
   $('#setting-privacy-mode').value = data.preferences.privacy_mode || 'local-first';
+}
+
+async function loadHealth() {
+  const data = await request('/api/health');
+  const state = $('#model-state');
+  if (data.ollama.available && data.ollama.embed_model_ready && data.ollama.answer_model_ready) {
+    state.innerHTML = '<span></span>Ollama ready';
+    state.title = `${data.embed_model} + ${data.ollama_model}`;
+  } else if (data.ollama.available) {
+    state.innerHTML = '<span></span>Ollama needs models';
+    state.title = 'Run the model pull commands shown in the README.';
+  } else {
+    state.innerHTML = '<span></span>Search ready · chat offline';
+    state.title = 'Keyword and fallback semantic search work; start Ollama for grounded chat.';
+  }
+}
+
+async function loadCollections() {
+  const data = await request('/api/collections');
+  $('#collections').innerHTML = data.collections.length ? data.collections.map((collection) => `
+    <article class="graph-edge"><div><strong>${escapeHtml(collection.name)}</strong></div>
+    <small>${escapeHtml((collection.tags || []).join(', ') || collection.query || 'Manual collection')}</small></article>`).join('') : '<p class="empty-state">Collections will appear here.</p>';
 }
 
 async function showPreview(chunkId) {
@@ -232,7 +255,7 @@ function validationDetail(validation) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadLibrary(), loadInsights(), loadSavedSearches(), loadHistory(), loadEvaluations(), loadWatchFolders(), loadSettings()]);
+  await Promise.all([loadLibrary(), loadInsights(), loadSavedSearches(), loadHistory(), loadEvaluations(), loadWatchFolders(), loadSettings(), loadHealth(), loadCollections()]);
 }
 
 $('#global-search').addEventListener('keydown', (event) => {
@@ -346,6 +369,25 @@ $('#watch-submit').addEventListener('click', async () => {
   await refreshAll();
 });
 
+$('#watch-scan').addEventListener('click', async () => {
+  await request('/api/watch-folders/scan', { method: 'POST' });
+  await refreshAll();
+});
+
+$('#collection-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  await request('/api/collections', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: $('#collection-name').value.trim(),
+      tags: $('#collection-tags').value.split(',').map((tag) => tag.trim()).filter(Boolean),
+      query: state.lastQuery
+    })
+  });
+  event.currentTarget.reset();
+  await loadCollections();
+});
+
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   await request('/api/settings', {
@@ -353,6 +395,7 @@ $('#settings-form').addEventListener('submit', async (event) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       embed_provider: $('#setting-embed-provider').value,
+      vector_provider: $('#setting-vector-provider').value,
       embed_model: $('#setting-embed-model').value.trim(),
       ollama_model: $('#setting-ollama-model').value.trim(),
       privacy_mode: $('#setting-privacy-mode').value
@@ -360,6 +403,8 @@ $('#settings-form').addEventListener('submit', async (event) => {
   });
   await loadSettings();
 });
+
+$('.settings-button').addEventListener('click', () => navigate('settings'));
 
 function navigate(view) {
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
