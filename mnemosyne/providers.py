@@ -6,6 +6,7 @@ import math
 import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Protocol, Sequence
 
 
@@ -55,6 +56,9 @@ class OllamaEmbedder:
         self.base_url = base_url
         self.model = model
         self._dimensions = dimensions
+        self.last_backend = "unavailable"
+        self.last_error: str | None = None
+        self._fallback = HashingEmbedder(dimensions)
 
     @property
     def dimensions(self) -> int:
@@ -70,16 +74,18 @@ class OllamaEmbedder:
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
                 payload = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return HashingEmbedder().embed(texts)
-            return HashingEmbedder().embed(texts)
-        except urllib.error.URLError as exc:
-            return HashingEmbedder().embed(texts)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            self.last_backend = "hash-fallback"
+            self.last_error = str(exc)
+            return self._fallback.embed(texts)
         embeddings = payload.get("embeddings") or []
         if not embeddings:
-            return HashingEmbedder().embed(texts)
+            self.last_backend = "hash-fallback"
+            self.last_error = "Ollama returned no embeddings"
+            return self._fallback.embed(texts)
         self._dimensions = len(embeddings[0])
+        self.last_backend = "ollama"
+        self.last_error = None
         return embeddings
 
 
@@ -105,11 +111,25 @@ class OllamaGenerator:
 
 
 class ChromaVectorAdapter:
-    """Lightweight adapter contract for a future Chroma-backed vector store."""
+    """Persistent Chroma adapter used when ``MNEMO_VECTOR_PROVIDER=chroma``."""
 
-    def __init__(self) -> None:
-        self.records: list[dict] = []
+    def __init__(self, path: Path, collection: str = "mnemosyne") -> None:
+        try:
+            import chromadb
+        except ImportError as exc:
+            raise RuntimeError("Chroma mode requires `pip install -e '.[full]'`.") from exc
+        self.client = chromadb.PersistentClient(path=str(path))
+        self.collection = self.client.get_or_create_collection(collection, metadata={"hnsw:space": "cosine"})
 
     def add(self, ids: Sequence[str], vectors: Sequence[list[float]], metadata: Sequence[dict]) -> None:
-        for item_id, vector, meta in zip(ids, vectors, metadata):
-            self.records.append({"id": item_id, "vector": vector, "metadata": meta})
+        if ids:
+            self.collection.upsert(ids=list(ids), embeddings=list(vectors), metadatas=list(metadata))
+
+    def delete_document(self, path: str) -> None:
+        self.collection.delete(where={"document_path": path})
+
+    def query(self, vector: list[float], limit: int = 20) -> list[tuple[int, float]]:
+        result = self.collection.query(query_embeddings=[vector], n_results=limit)
+        ids = (result.get("ids") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
+        return [(int(item_id), 1.0 - float(distance)) for item_id, distance in zip(ids, distances)]
