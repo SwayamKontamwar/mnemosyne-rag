@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Iterable
 
@@ -69,7 +70,7 @@ def parse(path: Path) -> list[SourceDocument]:
     if suffix in {".csv", ".tsv"}:
         return [_source_document(path, absolute, path.read_text(encoding="utf-8", errors="ignore"), suffix.lstrip("."))]
     if suffix == ".xlsx":
-        return [_source_document(path, absolute, "Spreadsheet workbook imported for future structured parsing.", "xlsx")]
+        return [_source_document(path, absolute, _extract_xlsx_text(path), "xlsx")]
     return [_source_document(path, absolute, path.read_text(encoding="utf-8"), suffix.lstrip(".") or "txt")]
 
 
@@ -151,3 +152,36 @@ def _tags_from_text(text: str) -> list[str]:
         else:
             expanded.append(tag.strip().lower())
     return [tag for tag in expanded if tag]
+
+
+def _extract_xlsx_text(path: Path) -> str:
+    from zipfile import ZipFile
+
+    ns = {
+        "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    }
+    with ZipFile(path) as archive:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in root.findall(".//main:si", ns):
+                shared_strings.append(" ".join(text.text or "" for text in item.findall(".//main:t", ns)))
+        rows: list[str] = []
+        for name in sorted(archive.namelist()):
+            if not name.startswith("xl/worksheets/sheet") or not name.endswith(".xml"):
+                continue
+            root = ET.fromstring(archive.read(name))
+            for row in root.findall(".//main:row", ns):
+                cells: list[str] = []
+                for cell in row.findall("main:c", ns):
+                    value = cell.find("main:v", ns)
+                    if value is None or value.text is None:
+                        continue
+                    if cell.attrib.get("t") == "s":
+                        index = int(value.text)
+                        cells.append(shared_strings[index] if index < len(shared_strings) else value.text)
+                    else:
+                        cells.append(value.text)
+                if cells:
+                    rows.append("\t".join(cells))
+        return "\n".join(rows)
