@@ -35,7 +35,7 @@
           <input id="global-search" type="search" placeholder="Search everything…" autocomplete="off">
           <kbd>⌘ K</kbd>
         </div>
-        <div class="model-state"><span></span>Local model</div>
+        <div id="model-state" class="model-state"><span></span>Checking local model…</div>
       </header>
 
       <div class="content">
@@ -78,11 +78,11 @@
           <div id="connections" class="drop-panel" data-section="connections">
             <div class="section-heading"><div><p class="eyebrow">ADD KNOWLEDGE</p><h2>Drop something in</h2></div></div>
             <label id="drop-zone" class="drop-zone">
-              <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.csv,.tsv,.xlsx">
+              <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.csv,.tsv,.xlsx,.zip">
               <span class="drop-icon">↓</span>
               <strong>Drop files here</strong>
               <span>or click to choose</span>
-              <small>Markdown, text, PDF, Office docs, and spreadsheet sources</small>
+              <small>Markdown, text, PDF, Office docs, spreadsheets, Notion and Obsidian ZIP exports</small>
             </label>
             <div id="upload-status" class="upload-status" aria-live="polite"></div>
             <div class="watcher-form">
@@ -93,6 +93,7 @@
                 <option value="notion">Notion export</option>
               </select>
               <button id="watch-submit" class="quiet-button" type="button">Add watch folder</button>
+              <button id="watch-scan" class="quiet-button" type="button">Scan now</button>
             </div>
             <div id="watch-folders" class="watch-list"></div>
           </div>
@@ -109,7 +110,7 @@
             <div id="graph" class="graph-list"><p class="empty-state">Graph connections will appear here.</p></div>
           </div>
 
-          <div class="cluster-panel">
+          <div class="cluster-panel" data-section="settings">
             <div class="section-heading"><div><p class="eyebrow">TOPIC CLUSTERS</p><h2>Emerging themes</h2></div></div>
             <div id="clusters" class="cluster-list"><p class="empty-state">Clusters will appear here.</p></div>
           </div>
@@ -141,11 +142,29 @@
             <div class="section-heading"><div><p class="eyebrow">PROVIDER SETTINGS</p><h2>Local defaults</h2></div></div>
             <form id="settings-form" class="settings-form">
               <label><span>Embedding provider</span><select id="setting-embed-provider"><option value="ollama">Ollama</option><option value="hash">Hash fallback</option></select></label>
+              <label><span>Vector index</span><select id="setting-vector-provider"><option value="sqlite">SQLite vectors</option><option value="chroma">Chroma</option></select></label>
               <label><span>Embedding model</span><input id="setting-embed-model" type="text" placeholder="nomic-embed-text"></label>
               <label><span>Answer model</span><input id="setting-ollama-model" type="text" placeholder="qwen2.5:7b"></label>
               <label><span>Privacy mode</span><select id="setting-privacy-mode"><option value="local-first">Local first</option><option value="strict-local">Strict local</option></select></label>
               <button type="submit">Save settings</button>
             </form>
+          </div>
+        </section>
+
+        <section class="insight-grid">
+          <div class="graph-panel">
+            <div class="section-heading"><div><p class="eyebrow">COLLECTIONS</p><h2>Curated knowledge</h2></div></div>
+            <form id="collection-form" class="inline-form">
+              <input id="collection-name" type="text" placeholder="Collection name" required>
+              <input id="collection-tags" type="text" placeholder="tags, comma separated">
+              <button type="submit">Create</button>
+            </form>
+            <div id="collections" class="graph-list"><p class="empty-state">Collections will appear here.</p></div>
+          </div>
+          <div class="cluster-panel">
+            <div class="section-heading"><div><p class="eyebrow">PORTABILITY</p><h2>Your data stays yours</h2></div></div>
+            <p class="hero-copy">Export a complete local backup including indexed chunks, settings, saved searches, and history.</p>
+            <a class="quiet-button" href="/api/backup" download="mnemosyne-backup.json">Download backup</a>
           </div>
         </section>
 
