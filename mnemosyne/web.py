@@ -31,6 +31,9 @@ app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     limit: int = Field(default=8, ge=1, le=30)
+    tag: str | None = None
+    folder: str | None = None
+    file_type: str | None = None
 
 
 class AskRequest(BaseModel):
@@ -44,18 +47,28 @@ def home() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "privacy": "local-first", "model": settings.ollama_model}
+    return {
+        "status": "ok",
+        "privacy": "local-first",
+        "model": settings.ollama_model,
+        "embed_provider": settings.embed_provider,
+        "embed_model": settings.embed_model,
+    }
 
 
 @app.get("/api/library")
-def library() -> dict:
-    documents = knowledge.store.list_documents()
+def library(tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> dict:
+    documents = knowledge.store.list_documents(tag=tag, folder=folder, file_type=file_type)
     for document in documents:
         path = Path(document["path"])
         document["name"] = _display_name(path)
-        document["type"] = path.suffix.lower().lstrip(".") or "text"
+        document["type"] = document["file_type"] or path.suffix.lower().lstrip(".") or "text"
         document.pop("digest", None)
-    return {"documents": documents, "stats": knowledge.store.stats()}
+    return {
+        "documents": documents,
+        "stats": knowledge.store.stats(),
+        "filters": {"tags": knowledge.store.list_tags(), "folders": knowledge.store.list_folders()},
+    }
 
 
 @app.post("/api/documents")
@@ -83,7 +96,7 @@ def upload_documents(files: list[UploadFile] = File(...)) -> dict:
 
 @app.post("/api/search")
 def search(request: SearchRequest) -> dict:
-    hits = knowledge.search(request.query, request.limit)
+    hits = knowledge.search(request.query, request.limit, tag=request.tag, folder=request.folder, file_type=request.file_type)
     return {
         "query": request.query,
         "results": [
@@ -93,6 +106,7 @@ def search(request: SearchRequest) -> dict:
                 "text": hit.text,
                 "citation": hit.citation,
                 "score": round(hit.score, 4),
+                "tags": list(hit.tags),
             }
             for hit in hits
         ],
@@ -109,9 +123,46 @@ def ask(request: AskRequest) -> dict:
     return {
         "answer": answer,
         "sources": [
-            {"number": index, "title": hit.title, "citation": hit.citation, "text": hit.text}
+            {"number": index, "title": hit.title, "citation": hit.citation, "text": hit.text, "chunk_id": hit.chunk_id}
             for index, hit in enumerate(hits, 1)
         ],
+    }
+
+
+@app.get("/api/chunks/{chunk_id}")
+def chunk_preview(chunk_id: int) -> dict:
+    preview = knowledge.store.chunk_preview(chunk_id)
+    if not preview:
+        raise HTTPException(404, "Chunk not found.")
+    return {
+        "id": preview.chunk_id,
+        "title": preview.title,
+        "text": preview.text,
+        "citation": preview.citation,
+        "page": preview.page,
+        "start_line": preview.start_line,
+        "end_line": preview.end_line,
+        "tags": list(preview.tags),
+    }
+
+
+@app.get("/api/graph")
+def graph(limit: int = 24) -> dict:
+    return {
+        "edges": [
+            {"source": edge.source, "target": edge.target, "weight": round(edge.weight, 4), "reason": edge.reason}
+            for edge in knowledge.graph(limit)
+        ]
+    }
+
+
+@app.get("/api/clusters")
+def clusters(limit: int = 8) -> dict:
+    return {
+        "clusters": [
+            {"name": cluster.name, "documents": list(cluster.document_paths), "keywords": list(cluster.keywords)}
+            for cluster in knowledge.clusters(limit)
+        ]
     }
 
 
