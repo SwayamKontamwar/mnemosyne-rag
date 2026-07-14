@@ -23,3 +23,19 @@ def test_ingest_and_search(tmp_path: Path):
     hits = kb.search("semantic keyword retrieval")
     assert hits
     assert "retrieval.md" in hits[0].citation
+
+
+def test_library_stats_and_document_listing(tmp_path: Path):
+    note = tmp_path / "ideas.md"
+    note.write_text("Mnemosyne keeps citations attached to every indexed passage.")
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db")
+    kb = KnowledgeBase(settings)
+    kb.ingest(note)
+    stats = kb.store.stats()
+    documents = kb.store.list_documents()
+
+    assert stats["documents"] == 1
+    assert stats["chunks"] >= 1
+    assert stats["characters"] > 0
+    assert documents[0]["path"].endswith("ideas.md")
+    assert documents[0]["chunk_count"] >= 1
