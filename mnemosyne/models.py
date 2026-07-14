@@ -95,3 +95,31 @@ class TopicCluster:
     name: str
     document_paths: tuple[str, ...] = field(default_factory=tuple)
     keywords: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SavedSearch:
+    id: int
+    name: str
+    query: str
+    tag: str | None = None
+    folder: str | None = None
+    file_type: str | None = None
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class ConversationEntry:
+    id: int
+    mode: str
+    query: str
+    answer: str = ""
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class WatchFolder:
+    path: str
+    profile: str = "local"
+    enabled: bool = True
+    indexed_at: str = ""
