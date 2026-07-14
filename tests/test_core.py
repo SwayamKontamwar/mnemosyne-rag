@@ -87,3 +87,33 @@ def test_citation_validation_flags_missing_and_weak_support(tmp_path: Path):
     assert validation.answer_has_citations is True
     assert 3 in validation.missing_numbers
     assert 2 in validation.unsupported_numbers
+
+
+def test_saved_searches_watch_folders_and_backup(tmp_path: Path):
+    notes = tmp_path / "vault"
+    notes.mkdir()
+    (notes / "ideas.md").write_text("#rag Local watch folders should reindex changes.")
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", tmp_path / "data" / "settings.json")
+    kb = KnowledgeBase(settings)
+    kb.register_watch_folder(notes, "obsidian")
+    kb.save_search("rag search", "local watch folders", "rag", None, None)
+    prefs = kb.save_settings({"privacy_mode": "strict-local", "embed_provider": "ollama"})
+    backup = kb.backup()
+
+    assert prefs["privacy_mode"] == "strict-local"
+    assert backup["saved_searches"]
+    assert backup["watch_folders"]
+    assert backup["documents"]
+
+
+def test_reader_and_entities(tmp_path: Path):
+    note = tmp_path / "timeline.md"
+    note.write_text("OpenAI Research met on July 14, 2026. The plan was not approved at first.")
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", tmp_path / "data" / "settings.json")
+    kb = KnowledgeBase(settings)
+    kb.ingest(note)
+    reader = kb.reader(str(note.resolve()))
+
+    assert reader["chunks"]
+    assert reader["entities"]
+    assert reader["timeline"]
