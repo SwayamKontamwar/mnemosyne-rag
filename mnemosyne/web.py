@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import asynccontextmanager
+import json
+import threading
+import urllib.error
+import urllib.request
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -19,11 +24,29 @@ static_dir = Path(__file__).parent / "static"
 upload_dir = settings.home / "uploads"
 upload_dir.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+watch_stop = threading.Event()
+watch_thread: threading.Thread | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global watch_thread
+    if watch_thread is None or not watch_thread.is_alive():
+        watch_stop.clear()
+        watch_thread = threading.Thread(target=knowledge.watch_forever, args=(watch_stop,), daemon=True, name="mnemosyne-watcher")
+        watch_thread.start()
+    try:
+        yield
+    finally:
+        watch_stop.set()
+        if watch_thread and watch_thread.is_alive():
+            watch_thread.join(timeout=3)
 
 app = FastAPI(
     title="Mnemosyne",
     description="Local-first personal knowledge search with grounded citations.",
     version="0.2.0",
+    lifespan=lifespan,
 )
 app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
 
@@ -64,6 +87,7 @@ class SettingsRequest(BaseModel):
     ollama_model: str | None = None
     privacy_mode: str | None = None
     source_reader_mode: str | None = None
+    vector_provider: str | None = None
 
 
 class WatchFolderRequest(BaseModel):
@@ -78,12 +102,12 @@ def home() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict:
+    ollama = _ollama_health()
     return {
-        "status": "ok",
+        "status": "ok" if ollama["available"] else "degraded",
         "privacy": "local-first",
-        "model": settings.ollama_model,
-        "embed_provider": settings.embed_provider,
-        "embed_model": settings.embed_model,
+        **knowledge.provider_status(),
+        "ollama": ollama,
     }
 
 
@@ -91,10 +115,11 @@ def health() -> dict:
 def app_settings() -> dict:
     return {
         "runtime": {
-            "ollama_url": settings.ollama_url,
-            "ollama_model": settings.ollama_model,
-            "embed_provider": settings.embed_provider,
-            "embed_model": settings.embed_model,
+            "ollama_url": knowledge.settings.ollama_url,
+            "ollama_model": knowledge.settings.ollama_model,
+            "embed_provider": knowledge.settings.embed_provider,
+            "embed_model": knowledge.settings.embed_model,
+            "vector_provider": knowledge.settings.vector_provider,
         },
         "preferences": knowledge.store.load_settings(),
     }
@@ -133,7 +158,7 @@ def upload_documents(files: list[UploadFile] = File(...)) -> dict:
     for upload in files:
         original = Path(upload.filename or "untitled").name
         suffix = Path(original).suffix.lower()
-        if suffix not in SUPPORTED:
+        if suffix not in SUPPORTED and suffix != ".zip":
             rejected.append({"name": original, "reason": f"Unsupported file type: {suffix or 'none'}"})
             continue
         destination = upload_dir / f"{uuid4().hex}-{original}"
@@ -142,7 +167,12 @@ def upload_documents(files: list[UploadFile] = File(...)) -> dict:
         except ValueError as exc:
             rejected.append({"name": original, "reason": str(exc)})
             continue
-        count, _ = knowledge.ingest(destination)
+        try:
+            count, _ = knowledge.import_archive(destination) if suffix == ".zip" else knowledge.ingest(destination)
+        except (ValueError, OSError) as exc:
+            rejected.append({"name": original, "reason": str(exc)})
+            destination.unlink(missing_ok=True)
+            continue
         indexed.append({"name": original, "indexed": bool(count)})
     return {"indexed": indexed, "rejected": rejected}
 
@@ -204,7 +234,7 @@ def history(limit: int = 50) -> dict:
 
 @app.post("/api/ask")
 def ask(request: AskRequest) -> dict:
-    generator = OllamaGenerator(settings.ollama_url, settings.ollama_model)
+    generator = OllamaGenerator(knowledge.settings.ollama_url, knowledge.settings.ollama_model)
     try:
         answer, hits, validation = knowledge.ask(
             request.query,
@@ -297,9 +327,25 @@ def diagnostics(limit: int = 100) -> dict:
     return {"diagnostics": knowledge.diagnostics(limit)}
 
 
+@app.get("/api/compare")
+def compare(left: str, right: str) -> dict:
+    try:
+        return knowledge.compare(left, right)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.get("/api/backup")
 def backup() -> JSONResponse:
     return JSONResponse(knowledge.backup())
+
+
+@app.post("/api/restore")
+def restore(payload: dict) -> dict:
+    try:
+        return knowledge.store.restore_payload(payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, f"Invalid backup: {exc}") from exc
 
 
 def main() -> None:
@@ -334,3 +380,18 @@ def _dump_model(model: BaseModel, **kwargs) -> dict:
     if hasattr(model, "model_dump"):
         return model.model_dump(**kwargs)
     return model.dict(**kwargs)
+
+
+def _ollama_health() -> dict:
+    try:
+        with urllib.request.urlopen(f"{knowledge.settings.ollama_url}/api/tags", timeout=2) as response:
+            payload = json.loads(response.read())
+        models = [item.get("name", "") for item in payload.get("models", [])]
+        return {
+            "available": True,
+            "models": models,
+            "embed_model_ready": any(name.split(":")[0] == knowledge.settings.embed_model.split(":")[0] for name in models),
+            "answer_model_ready": any(name.split(":")[0] == knowledge.settings.ollama_model.split(":")[0] for name in models),
+        }
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return {"available": False, "models": [], "embed_model_ready": False, "answer_model_ready": False}
