@@ -13,8 +13,11 @@ from .models import Chunk, ChunkPreview, ConversationEntry, DocumentRecord, Grap
 class KnowledgeStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.connection = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA busy_timeout=30000")
+        self.connection.execute("PRAGMA foreign_keys=ON")
 
     def initialize(self) -> None:
         self.connection.executescript(
@@ -121,7 +124,7 @@ class KnowledgeStore:
         row = self.connection.execute("SELECT digest FROM documents WHERE path = ?", (path,)).fetchone()
         return row["digest"] if row else None
 
-    def replace_document(self, path: str, digest: str, chunks: Iterable[tuple[Chunk, list[float]]], metadata: dict) -> None:
+    def replace_document(self, path: str, digest: str, chunks: Iterable[tuple[Chunk, list[float]]], metadata: dict) -> list[int]:
         prepared = list(chunks)
         with self.connection:
             self.connection.execute("DELETE FROM chunks WHERE document_path = ?", (path,))
@@ -171,6 +174,16 @@ class KnowledgeStore:
                     for c, v in prepared
                 ),
             )
+        return [row["id"] for row in self.connection.execute("SELECT id FROM chunks WHERE document_path = ? ORDER BY ordinal", (path,))]
+
+    def remove_document(self, path: str) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM chunks WHERE document_path = ?", (path,))
+            self.connection.execute("DELETE FROM documents WHERE path = ?", (path,))
+
+    def document_paths_below(self, folder: str) -> list[str]:
+        prefix = str(Path(folder).resolve())
+        return [row["path"] for row in self.connection.execute("SELECT path FROM documents WHERE path LIKE ?", (f"{prefix}%",))]
 
     def hybrid_search(self, query: str, query_vector: list[float], limit: int = 8, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[SearchHit]:
         rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type)
@@ -291,6 +304,24 @@ class KnowledgeStore:
             end_line=row["end_line"],
             tags=tuple(json.loads(row["tags"] or "[]")),
         )
+
+    def hits_by_ids(self, ids: list[int], scores: dict[int, float]) -> list[SearchHit]:
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.connection.execute(f"SELECT * FROM chunks WHERE id IN ({placeholders})", ids).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        return [
+            SearchHit(item_id, by_id[item_id]["text"], by_id[item_id]["title"], by_id[item_id]["citation"], scores[item_id], tuple(json.loads(by_id[item_id]["tags"] or "[]")))
+            for item_id in ids if item_id in by_id
+        ]
+
+    def all_chunk_previews(self, exclude_path: str | None = None) -> list[ChunkPreview]:
+        rows = self.connection.execute("SELECT * FROM chunks WHERE document_path != ? ORDER BY id" if exclude_path else "SELECT * FROM chunks ORDER BY id", (exclude_path,) if exclude_path else ()).fetchall()
+        return [
+            ChunkPreview(row["id"], row["title"], row["text"], row["citation"], row["page"], row["start_line"], row["end_line"], tuple(json.loads(row["tags"] or "[]")))
+            for row in rows
+        ]
 
     def document_chunks(self, path: str) -> list[ChunkPreview]:
         rows = self.connection.execute(
@@ -503,7 +534,29 @@ class KnowledgeStore:
             "settings": self.load_settings(),
             "evaluations": self.evaluation_summary(),
             "diagnostics": [diagnostic.__dict__ for diagnostic in self.list_diagnostics()],
+            "chunks": [dict(row) for row in self.connection.execute("SELECT * FROM chunks ORDER BY id")],
         }
+
+    def restore_payload(self, payload: dict) -> dict[str, int]:
+        documents = payload.get("documents") or []
+        chunks = payload.get("chunks") or []
+        if not isinstance(documents, list) or not isinstance(chunks, list):
+            raise ValueError("Backup must contain document and chunk lists.")
+        with self.connection:
+            for document in documents:
+                self.connection.execute(
+                    """INSERT INTO documents(path,digest,title,source_type,file_type,folder,tags,links,indexed_at)
+                       VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP))
+                       ON CONFLICT(path) DO UPDATE SET digest=excluded.digest,title=excluded.title,source_type=excluded.source_type,file_type=excluded.file_type,folder=excluded.folder,tags=excluded.tags,links=excluded.links,indexed_at=excluded.indexed_at""",
+                    (document["path"], document.get("digest", "restored"), document.get("title", ""), document.get("source_type", "file"), document.get("file_type", "txt"), document.get("folder", "root"), json.dumps(document.get("tags", [])), json.dumps(document.get("links", [])), document.get("indexed_at")),
+                )
+                self.connection.execute("DELETE FROM chunks WHERE document_path = ?", (document["path"],))
+            for chunk in chunks:
+                self.connection.execute(
+                    "INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (chunk["document_path"], chunk["title"], chunk["text"], chunk["ordinal"], chunk["citation"], chunk["vector"], chunk.get("tags", "[]"), chunk.get("start_line"), chunk.get("end_line"), chunk.get("page")),
+                )
+        return {"documents": len(documents), "chunks": len(chunks)}
 
     def log_diagnostic(self, path: str, level: str, code: str, message: str) -> None:
         with self.connection:
