@@ -76,13 +76,15 @@ The app now includes:
 
 ## One-command local run
 
-You can run the app in Docker:
+You can run the complete local stack in Docker. This starts Mnemosyne, persistent Chroma, Ollama, OCR tooling, and a one-time model downloader:
 
 ```bash
 docker compose up --build
 ```
 
 Then open `http://127.0.0.1:8765`.
+
+The first launch downloads `nomic-embed-text` and `qwen2.5:3b` (roughly 2.2 GB total), so model-backed chat becomes ready after those downloads finish. The header reports `Ollama ready` when both models are available. Set `MNEMO_PORT=9000` before the command if port 8765 is occupied.
 
 ## Architecture
 
@@ -96,21 +98,31 @@ query -----> embedder -> hybrid retriever --------+
 
 Current defaults favor simplicity with a path to a much richer local product:
 
-- Storage: local SQLite for metadata, chunks, keyword search, and vectors
-- Embeddings: hashing baseline today, optional Ollama embeddings via `MNEMO_EMBED_PROVIDER=ollama`
+- Storage: local SQLite for metadata and FTS5, with SQLite vectors by default or persistent Chroma via `MNEMO_VECTOR_PROVIDER=chroma`
+- Embeddings: Ollama `nomic-embed-text` by default, with an explicit deterministic hash fallback when Ollama is offline
 - Generation: Ollama for private local answering
 - UI: FastAPI plus static HTML/CSS/JS for a fast local dashboard
 - Metadata: folders, tags, wiki-links, and source types for collections and filters
 
-The hashing embedder is intentionally still the safe default for zero-setup development, but the system now has a real local upgrade path through Ollama embeddings.
+The UI reports whether real Ollama embeddings are active, whether fallback search is being used, and whether the configured answer model is ready.
 
-## Near-term roadmap
+## Completed product layer
 
-1. Upgrade embeddings to a stronger local model
-2. Add citations that deep-link into chunk and page previews
-3. Introduce folders, tags, and source filters
-4. Add semantic clustering and note graph exploration
-5. Support watch folders plus Notion and Obsidian import flows
+1. Strong local Ollama embeddings with observable fallback state
+2. Citations that deep-link into exact chunk and page previews
+3. Folders, tags, source filters, and collections
+4. Semantic connections, clustering, related notes, and graph exploration
+5. Continuous watch folders plus safe Notion and Obsidian ZIP imports
+
+## Verification
+
+```bash
+pip install -e '.[dev,full]'
+pytest -q
+docker compose build mnemosyne
+```
+
+The suite covers incremental ingestion, FTS/vector retrieval, Ollama's real HTTP protocol, Chroma persistence, citation repair/validation, watch-folder updates and deletions, safe ZIP imports, backup restoration, structured Office parsing, and the web upload/search/preview flow. The production image includes Poppler and Tesseract; scanned PDFs are OCRed per page and retain page citations.
 
 ## Product milestones
 
