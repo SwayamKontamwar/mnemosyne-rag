@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from pathlib import Path
 
 from .config import Settings
@@ -30,12 +29,26 @@ class KnowledgeBase:
                 skipped += 1
                 continue
             documents = parse(path)
+            if not documents:
+                self.store.log_diagnostic(
+                    absolute,
+                    "warning",
+                    "no_text_extracted",
+                    "No searchable text was extracted. This file may need OCR or a richer parser.",
+                )
+                continue
             chunks = [
                 chunk
                 for document in documents
                 for chunk in chunk_document(document, self.settings.chunk_size, self.settings.chunk_overlap)
             ]
             if not chunks:
+                self.store.log_diagnostic(
+                    absolute,
+                    "warning",
+                    "empty_chunks",
+                    "The parser found a document but no searchable chunks were produced.",
+                )
                 continue
             vectors = self.embedder.embed([chunk.text for chunk in chunks])
             primary = documents[0]
@@ -122,6 +135,8 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
 
     def register_watch_folder(self, path: Path, profile: str = "local") -> tuple[int, int]:
         absolute = path.expanduser().resolve()
+        if not absolute.exists():
+            raise FileNotFoundError(f"Watch folder does not exist: {absolute}")
         self.store.upsert_watch_folder(str(absolute), profile)
         return self.ingest(absolute)
 
@@ -194,6 +209,9 @@ QUESTION:\n{query}\n\nNOTES:\n{context}\n\nANSWER:"""
 
     def backup(self) -> dict:
         return self.store.backup_payload()
+
+    def diagnostics(self, limit: int = 100) -> list[dict]:
+        return [diagnostic.__dict__ for diagnostic in self.store.list_diagnostics(limit)]
 
     def _default_embedder(self) -> Embedder:
         if self.settings.embed_provider == "ollama":
