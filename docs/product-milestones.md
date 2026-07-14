@@ -1,6 +1,6 @@
 # Mnemosyne Product Milestones
 
-This file turns the roadmap into a build contract for the project. The goal is not to claim every milestone is finished today. The goal is to give the repository a concrete product shape so future implementation can stay intentional.
+This file is the implemented product contract. Each milestone has an executable path in the service, CLI, web UI, or container stack and regression coverage for its critical workflow.
 
 ## Milestone 1 — Reliable local library
 
@@ -26,10 +26,7 @@ Status:
 - Citation validation
 - Search and chat interfaces
 
-Status:
-- Hybrid retrieval and grounded answers exist
-- Ollama embeddings are now wired as a first-class local provider option
-- Chroma adapter, reranking, and citation validation still need focused implementation
+Status: implemented. Compose uses real Ollama embeddings and persistent Chroma; retrieval fuses semantic and FTS5 signals, reranks locally, repairs uncited model output, and validates every returned citation.
 
 ## Milestone 3 — Broad document support
 
@@ -40,10 +37,7 @@ Status:
 - File-system watcher
 - Better parsing diagnostics
 
-Status:
-- DOCX, PPTX, CSV, TSV, and XLSX ingestion stubs are now recognized
-- Folder imports already work through recursive discovery
-- OCR, watcher orchestration, and richer parsing diagnostics remain open
+Status: implemented. Office documents retain paragraph, slide, row, or sheet structure where available. Scanned PDF pages use local Poppler/Tesseract OCR. The app continuously scans registered folders, handles edits and deletions, imports safe ZIP exports, and records parser failures.
 
 ## Milestone 4 — Knowledge intelligence
 
@@ -55,10 +49,7 @@ Status:
 - Cross-document comparison
 - Timeline and contradiction detection
 
-Status:
-- Semantic backlinks already exist
-- Topic clustering and graph endpoints now exist in lightweight form
-- Entity extraction, contradiction detection, and deeper cross-document reasoning remain future work
+Status: implemented as a transparent local intelligence layer. Backlinks and recommendations use document vectors, graph edges include semantic/tag/wiki-link reasons, and reader views expose entities, timelines, cross-document comparison, and explainable contradiction candidates. Entity and contradiction analysis is intentionally heuristic rather than presented as infallible fact extraction.
 
 ## Milestone 5 — Polished personal product
 
@@ -71,9 +62,7 @@ Status:
 - Evaluation dashboard
 - Docker and one-command installation
 
-Status:
-- Tags and source filters now have backend support
-- The remaining items should be treated as the next UX and ops layer
+Status: implemented across the web UI and API, including collection creation, saved searches, history, live provider readiness, strict-local preferences, complete chunk-bearing backups and restore, grounding evaluations, and the tested Compose installation.
 
 ## Build principles
 
