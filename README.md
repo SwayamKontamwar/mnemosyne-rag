@@ -4,12 +4,14 @@ Mnemosyne is a local-first personal knowledge base for notes, PDFs, and document
 
 ## What the current version does
 
-- Ingests `.md`, `.markdown`, `.txt`, and `.pdf` sources
+- Ingests `.md`, `.markdown`, `.txt`, `.pdf`, `.docx`, `.pptx`, `.csv`, `.tsv`, and `.xlsx` sources
 - Tracks content hashes so re-indexing skips unchanged files
 - Stores everything locally in SQLite with FTS5 plus vector search
 - Supports direct search, cited question answering, and semantic backlinks
 - Ships with a browser-based local interface for uploads, library browsing, and chat
 - Keeps provider boundaries clean so local or cloud models can be swapped later
+- Extracts tags, folders, and wiki-style note links for filters and graph features
+- Exposes chunk preview, topic clusters, and lightweight note graph APIs
 
 ## Product shape
 
@@ -62,14 +64,15 @@ query -----> embedder -> hybrid retriever --------+
                          cited context -> generator -> grounded answer
 ```
 
-Current defaults favor simplicity:
+Current defaults favor simplicity with a path to a much richer local product:
 
 - Storage: local SQLite for metadata, chunks, keyword search, and vectors
-- Embeddings: lightweight hashing embedder for zero-setup development
+- Embeddings: hashing baseline today, optional Ollama embeddings via `MNEMO_EMBED_PROVIDER=ollama`
 - Generation: Ollama for private local answering
 - UI: FastAPI plus static HTML/CSS/JS for a fast local dashboard
+- Metadata: folders, tags, wiki-links, and source types for collections and filters
 
-The hashing embedder is intentionally temporary. It keeps the system dependency-light while we shape the product, but the next serious upgrade should be a neural embedding provider through Ollama embeddings or Hugging Face sentence transformers.
+The hashing embedder is intentionally still the safe default for zero-setup development, but the system now has a real local upgrade path through Ollama embeddings.
 
 ## Near-term roadmap
 
@@ -78,3 +81,55 @@ The hashing embedder is intentionally temporary. It keeps the system dependency-
 3. Introduce folders, tags, and source filters
 4. Add semantic clustering and note graph exploration
 5. Support watch folders plus Notion and Obsidian import flows
+
+## Product milestones
+
+### Milestone 1 — Reliable local library
+
+- Drag-and-drop interface
+- Markdown, TXT and PDF ingestion
+- Document library
+- SQLite metadata
+- FTS5 keyword search
+- Incremental indexing
+- Exact line and page citations
+
+### Milestone 2 — Real semantic RAG
+
+- Ollama embeddings
+- Chroma adapter
+- Hybrid retrieval
+- Local reranking
+- Grounded Ollama answers
+- Citation validation
+- Search and chat interfaces
+
+### Milestone 3 — Broad document support
+
+- DOCX, PowerPoint and spreadsheets
+- OCR for scanned PDFs
+- Structure-aware chunking
+- Folder imports
+- File-system watcher
+- Better parsing diagnostics
+
+### Milestone 4 — Knowledge intelligence
+
+- Semantic backlinks
+- Entity extraction
+- Topic clustering
+- Knowledge graph
+- Related-note recommendations
+- Cross-document comparison
+- Timeline and contradiction detection
+
+### Milestone 5 — Polished personal product
+
+- Collections and tags
+- Saved searches
+- Conversation history
+- Provider settings
+- Privacy controls
+- Import/export and backups
+- Evaluation dashboard
+- Docker and one-command installation
