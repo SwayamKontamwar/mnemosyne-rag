@@ -38,6 +38,9 @@ class SearchRequest(BaseModel):
 
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
+    tag: str | None = None
+    folder: str | None = None
+    file_type: str | None = None
 
 
 @app.get("/", include_in_schema=False)
@@ -67,7 +70,11 @@ def library(tag: str | None = None, folder: str | None = None, file_type: str | 
     return {
         "documents": documents,
         "stats": knowledge.store.stats(),
-        "filters": {"tags": knowledge.store.list_tags(), "folders": knowledge.store.list_folders()},
+        "filters": {
+            "tags": knowledge.store.list_tags(),
+            "folders": knowledge.store.list_folders(),
+            "types": sorted({document["file_type"] for document in documents}),
+        },
     }
 
 
@@ -117,7 +124,13 @@ def search(request: SearchRequest) -> dict:
 def ask(request: AskRequest) -> dict:
     generator = OllamaGenerator(settings.ollama_url, settings.ollama_model)
     try:
-        answer, hits = knowledge.ask(request.query, generator)
+        answer, hits, validation = knowledge.ask(
+            request.query,
+            generator,
+            tag=request.tag,
+            folder=request.folder,
+            file_type=request.file_type,
+        )
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
     return {
@@ -126,6 +139,13 @@ def ask(request: AskRequest) -> dict:
             {"number": index, "title": hit.title, "citation": hit.citation, "text": hit.text, "chunk_id": hit.chunk_id}
             for index, hit in enumerate(hits, 1)
         ],
+        "validation": {
+            "cited_numbers": list(validation.cited_numbers),
+            "missing_numbers": list(validation.missing_numbers),
+            "unsupported_numbers": list(validation.unsupported_numbers),
+            "answer_has_citations": validation.answer_has_citations,
+            "verdict": validation.verdict,
+        },
     }
 
 
