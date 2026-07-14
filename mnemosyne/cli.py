@@ -36,7 +36,14 @@ def parser() -> argparse.ArgumentParser:
     watch.add_argument("path", nargs="?")
     watch.add_argument("--profile", default="local")
     watch.add_argument("--scan", action="store_true")
+    watch.add_argument("--daemon", action="store_true", help="Continuously reindex registered folders")
+    watch.add_argument("--interval", type=float, default=2.0)
     commands.add_parser("backup", help="Export a local JSON backup")
+    restore = commands.add_parser("restore", help="Restore a Mnemosyne JSON backup")
+    restore.add_argument("path", type=Path)
+    archive = commands.add_parser("import", help="Import a Notion or Obsidian ZIP export")
+    archive.add_argument("path", type=Path)
+    archive.add_argument("--profile", default="notion")
     return root
 
 
@@ -56,7 +63,7 @@ def main() -> None:
     elif args.command == "ask":
         answer, hits, validation = kb.ask(
             args.query,
-            OllamaGenerator(settings.ollama_url, settings.ollama_model),
+            OllamaGenerator(kb.settings.ollama_url, kb.settings.ollama_model),
             tag=args.tag,
             folder=args.folder,
             file_type=args.file_type,
@@ -67,7 +74,13 @@ def main() -> None:
         for index, hit in enumerate(hits, 1):
             print(f"[{index}] {hit.citation}")
     elif args.command == "watch":
-        if args.scan:
+        if args.daemon:
+            print(f"Watching registered folders every {args.interval:g}s. Press Ctrl+C to stop.")
+            try:
+                kb.watch_forever(interval=args.interval)
+            except KeyboardInterrupt:
+                pass
+        elif args.scan:
             print(json.dumps(kb.scan_watch_folders(), indent=2))
         elif args.path:
             indexed, skipped = kb.register_watch_folder(Path(args.path), args.profile)
@@ -77,6 +90,11 @@ def main() -> None:
                 print(f"{watch.path} [{watch.profile}]")
     elif args.command == "backup":
         print(json.dumps(kb.backup(), indent=2))
+    elif args.command == "restore":
+        print(json.dumps(kb.store.restore_payload(json.loads(args.path.read_text())), indent=2))
+    elif args.command == "import":
+        indexed, skipped = kb.import_archive(args.path.expanduser(), args.profile)
+        print(f"Imported {indexed} file(s); skipped {skipped} unchanged file(s).")
     elif args.command == "serve":
         import uvicorn
 
