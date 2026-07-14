@@ -66,6 +66,11 @@
               <div><p class="eyebrow">KNOWLEDGE LIBRARY</p><h2>Your sources</h2></div>
               <button id="refresh-library" class="quiet-button">Refresh</button>
             </div>
+            <div class="filter-bar">
+              <label><span>Tag</span><select id="tag-filter"><option value="">All tags</option></select></label>
+              <label><span>Folder</span><select id="folder-filter"><option value="">All folders</option></select></label>
+              <label><span>Type</span><select id="type-filter"><option value="">All types</option></select></label>
+            </div>
             <div id="stats" class="stats" aria-label="Library statistics"></div>
             <div id="documents" class="documents"><p class="empty-state">Your library is empty. Add your first source to begin.</p></div>
           </div>
@@ -86,6 +91,23 @@
         <section id="search-results" class="results-panel" data-section="search" hidden>
           <div class="section-heading"><div><p class="eyebrow">SEARCH RESULTS</p><h2 id="results-title">Matching passages</h2></div></div>
           <div id="results"></div>
+        </section>
+
+        <section class="insight-grid">
+          <div class="graph-panel">
+            <div class="section-heading"><div><p class="eyebrow">KNOWLEDGE GRAPH</p><h2>Connected notes</h2></div></div>
+            <div id="graph" class="graph-list"><p class="empty-state">Graph connections will appear here.</p></div>
+          </div>
+
+          <div class="cluster-panel">
+            <div class="section-heading"><div><p class="eyebrow">TOPIC CLUSTERS</p><h2>Emerging themes</h2></div></div>
+            <div id="clusters" class="cluster-list"><p class="empty-state">Clusters will appear here.</p></div>
+          </div>
+        </section>
+
+        <section id="preview-panel" class="preview-panel" hidden>
+          <div class="section-heading"><div><p class="eyebrow">CITATION PREVIEW</p><h2 id="preview-title">Source chunk</h2></div></div>
+          <div id="preview-body" class="preview-body"></div>
         </section>
       </div>
     </main>
