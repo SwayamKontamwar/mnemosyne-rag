@@ -7,7 +7,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from .config import Settings
-from .ingest import chunk_document, discover, file_digest, parse
+from .ingest import chunk_document, discover, file_digest, ocr_status, parse
 from .models import CitationValidation, GraphEdge, SearchHit, TopicCluster
 from .providers import ChromaVectorAdapter, Embedder, Generator, HashingEmbedder, OllamaEmbedder
 from .store import KnowledgeStore
@@ -47,11 +47,19 @@ class KnowledgeBase:
                 self.store.log_diagnostic(absolute, "error", "parse_failed", f"{type(exc).__name__}: {exc}")
                 continue
             if not documents:
+                message = "No searchable text was extracted. This file may need OCR or a richer parser."
+                if path.suffix.lower() == ".pdf":
+                    status = ocr_status()
+                    if not status["available"]:
+                        message = (
+                            "No searchable text was extracted. Scanned PDF OCR needs Poppler `pdftoppm` "
+                            f"and Tesseract installed; missing: {', '.join(status['missing'])}."
+                        )
                 self.store.log_diagnostic(
                     absolute,
                     "warning",
                     "no_text_extracted",
-                    "No searchable text was extracted. This file may need OCR or a richer parser.",
+                    message,
                 )
                 continue
             chunks = [
