@@ -175,6 +175,34 @@ def _tags_from_text(text: str) -> list[str]:
 
 
 def _extract_xlsx_text(path: Path) -> str:
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return _extract_xlsx_text_from_xml(path)
+
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return _extract_xlsx_text_from_xml(path)
+    rows: list[str] = []
+    try:
+        for worksheet in workbook.worksheets:
+            rows.append(f"Sheet: {worksheet.title}")
+            for row in worksheet.iter_rows(values_only=True):
+                cells = [_format_cell(value) for value in row if value is not None and _format_cell(value)]
+                if cells:
+                    rows.append("\t".join(cells))
+    finally:
+        workbook.close()
+    return "\n".join(rows)
+
+
+def _format_cell(value: object) -> str:
+    text = str(value).strip()
+    return text
+
+
+def _extract_xlsx_text_from_xml(path: Path) -> str:
     from zipfile import ZipFile
 
     ns = {
@@ -194,6 +222,11 @@ def _extract_xlsx_text(path: Path) -> str:
             for row in root.findall(".//main:row", ns):
                 cells: list[str] = []
                 for cell in row.findall("main:c", ns):
+                    if cell.attrib.get("t") == "inlineStr":
+                        text = " ".join(node.text or "" for node in cell.findall(".//main:t", ns)).strip()
+                        if text:
+                            cells.append(text)
+                        continue
                     value = cell.find("main:v", ns)
                     if value is None or value.text is None:
                         continue
@@ -207,10 +240,23 @@ def _extract_xlsx_text(path: Path) -> str:
         return "\n".join(rows)
 
 
-def _ocr_pdf_page(path: Path, page: int) -> str:
-    """OCR one scanned PDF page using local Poppler and Tesseract binaries."""
+def ocr_status() -> dict[str, object]:
     pdftoppm = shutil.which("pdftoppm")
     tesseract = shutil.which("tesseract")
+    missing = [name for name, path in {"pdftoppm": pdftoppm, "tesseract": tesseract}.items() if not path]
+    return {
+        "available": not missing,
+        "missing": missing,
+        "pdftoppm": pdftoppm,
+        "tesseract": tesseract,
+    }
+
+
+def _ocr_pdf_page(path: Path, page: int) -> str:
+    """OCR one scanned PDF page using local Poppler and Tesseract binaries."""
+    status = ocr_status()
+    pdftoppm = status["pdftoppm"]
+    tesseract = status["tesseract"]
     if not pdftoppm or not tesseract:
         return ""
     with tempfile.TemporaryDirectory(prefix="mnemo-ocr-") as temp:
