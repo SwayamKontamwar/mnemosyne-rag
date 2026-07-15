@@ -1,8 +1,7 @@
 import json
 import importlib
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import Request
 from zipfile import ZipFile
 
 import pytest
@@ -180,6 +179,70 @@ def test_xlsx_parser_extracts_shared_strings(tmp_path: Path):
     assert "Citation audit" in docs[0].text
 
 
+def test_real_xlsx_upload_indexes_searchable_cell_values(tmp_path: Path, monkeypatch):
+    from openpyxl import Workbook
+
+    workbook_path = tmp_path / "budget.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Planning"
+    sheet.append(["Project", "Owner", "Signal"])
+    sheet.append(["Mnemosyne", "Swayam", "spreadsheet retrieval sentinel"])
+    workbook.save(workbook_path)
+
+    monkeypatch.setenv("MNEMO_HOME", str(tmp_path / "web-data"))
+    monkeypatch.setenv("MNEMO_EMBED_PROVIDER", "hash")
+    monkeypatch.setenv("MNEMO_VECTOR_PROVIDER", "sqlite")
+    import mnemosyne.web as web
+
+    web = importlib.reload(web)
+    with TestClient(web.app) as client:
+        uploaded = client.post(
+            "/api/documents",
+            files={
+                "files": (
+                    "budget.xlsx",
+                    workbook_path.read_bytes(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        assert uploaded.json()["indexed"][0]["indexed"] is True
+        library = client.get("/api/library").json()
+        assert library["stats"]["documents"] == 1
+        assert library["documents"][0]["type"] == "xlsx"
+        result = client.post("/api/search", json={"query": "spreadsheet retrieval sentinel"})
+        assert result.json()["results"]
+        assert "spreadsheet retrieval sentinel" in result.json()["results"][0]["text"]
+
+
+def test_upload_reports_scanned_pdf_ocr_dependency_problem(tmp_path: Path, monkeypatch):
+    pdf = tmp_path / "scanned.pdf"
+    pdf.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
+        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n"
+        b"xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000056 00000 n \n0000000111 00000 n \n"
+        b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF\n"
+    )
+    monkeypatch.setenv("MNEMO_HOME", str(tmp_path / "web-data"))
+    monkeypatch.setenv("MNEMO_EMBED_PROVIDER", "hash")
+    monkeypatch.setenv("MNEMO_VECTOR_PROVIDER", "sqlite")
+    monkeypatch.setattr("mnemosyne.ingest.shutil.which", lambda _name: None)
+    import mnemosyne.web as web
+
+    web = importlib.reload(web)
+    with TestClient(web.app) as client:
+        uploaded = client.post("/api/documents", files={"files": ("scanned.pdf", pdf.read_bytes(), "application/pdf")})
+        payload = uploaded.json()
+        assert payload["indexed"][0]["indexed"] is False
+        assert "missing: pdftoppm, tesseract" in payload["indexed"][0]["diagnostics"][0]["message"]
+        library = client.get("/api/library").json()
+        assert library["stats"]["documents"] == 0
+
+
 def test_watch_scan_indexes_changes_and_removes_deleted_files(tmp_path: Path):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -236,50 +299,47 @@ def test_pptx_keeps_slide_structure_and_page_citations(tmp_path: Path):
     assert chunks[1].citation.endswith("#page=2")
 
 
-def test_real_ollama_protocol_embedding_search_generation_and_validation(tmp_path: Path):
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length))
-            if self.path == "/api/embed":
-                vectors = []
-                for text in payload["input"]:
-                    vectors.append([1.0, 0.0, 0.0, 0.0] if "retrieval" in text.lower() else [0.0, 1.0, 0.0, 0.0])
-                body = {"embeddings": vectors}
-            elif self.path == "/api/generate":
-                assert "NOTES:" in payload["prompt"]
-                body = {"response": "Hybrid retrieval combines semantic and keyword search [1]."}
-            else:
-                self.send_response(404)
-                self.end_headers()
-                return
-            encoded = json.dumps(body).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+def test_real_ollama_protocol_embedding_search_generation_and_validation(tmp_path: Path, monkeypatch):
+    class FakeResponse:
+        def __init__(self, body: dict) -> None:
+            self.body = json.dumps(body).encode()
 
-        def log_message(self, format, *args):
-            return
+        def __enter__(self):
+            return self
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        base_url = f"http://127.0.0.1:{server.server_port}"
-        settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", ollama_url=base_url)
-        embedder = OllamaEmbedder(base_url, "nomic-embed-text", dimensions=4)
-        kb = KnowledgeBase(settings, embedder=embedder)
-        note = tmp_path / "retrieval.md"
-        note.write_text("Hybrid retrieval combines semantic and keyword search.")
-        assert kb.ingest(note) == (1, 0)
-        answer, hits, validation = kb.ask("How does retrieval work?", OllamaGenerator(base_url, "test-model"))
-        assert hits and "retrieval.md" in hits[0].citation
-        assert "[1]" in answer
-        assert validation.verdict == "grounded"
-        assert embedder.last_backend == "ollama"
-    finally:
-        server.shutdown()
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    def fake_urlopen(request: Request, timeout: int = 120):
+        payload = json.loads(request.data or b"{}")
+        url = request.full_url
+        if url.endswith("/api/embed"):
+            vectors = [
+                [1.0, 0.0, 0.0, 0.0] if "retrieval" in text.lower() else [0.0, 1.0, 0.0, 0.0]
+                for text in payload["input"]
+            ]
+            return FakeResponse({"embeddings": vectors})
+        if url.endswith("/api/generate"):
+            assert "NOTES:" in payload["prompt"]
+            return FakeResponse({"response": "Hybrid retrieval combines semantic and keyword search [1]."})
+        raise AssertionError(f"unexpected Ollama endpoint: {url}")
+
+    monkeypatch.setattr("mnemosyne.providers.urllib.request.urlopen", fake_urlopen)
+    base_url = "http://ollama.test"
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", ollama_url=base_url)
+    embedder = OllamaEmbedder(base_url, "nomic-embed-text", dimensions=4)
+    kb = KnowledgeBase(settings, embedder=embedder)
+    note = tmp_path / "retrieval.md"
+    note.write_text("Hybrid retrieval combines semantic and keyword search.")
+    assert kb.ingest(note) == (1, 0)
+    answer, hits, validation = kb.ask("How does retrieval work?", OllamaGenerator(base_url, "test-model"))
+    assert hits and "retrieval.md" in hits[0].citation
+    assert "[1]" in answer
+    assert validation.verdict == "grounded"
+    assert embedder.last_backend == "ollama"
 
 
 def test_chroma_adapter_is_persistent_and_searchable(tmp_path: Path):
@@ -323,7 +383,7 @@ def test_web_upload_library_search_and_citation_preview(tmp_path: Path, monkeypa
     with TestClient(web.app) as client:
         home = client.get("/")
         assert home.status_code == 200
-        assert "Drop something in" in home.text
+        assert "Upload" in home.text
         uploaded = client.post(
             "/api/documents",
             files={"files": ("notes.md", b"#rag End to end hybrid knowledge search", "text/markdown")},
