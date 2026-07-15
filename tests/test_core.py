@@ -1,11 +1,12 @@
 import json
+import asyncio
 import importlib
 from pathlib import Path
 from urllib.request import Request
 from zipfile import ZipFile
 
 import pytest
-from fastapi.testclient import TestClient
+import httpx
 
 from mnemosyne.config import Settings
 from mnemosyne.ingest import chunk_document, parse
@@ -196,25 +197,30 @@ def test_real_xlsx_upload_indexes_searchable_cell_values(tmp_path: Path, monkeyp
     import mnemosyne.web as web
 
     web = importlib.reload(web)
-    with TestClient(web.app) as client:
-        uploaded = client.post(
-            "/api/documents",
-            files={
-                "files": (
-                    "budget.xlsx",
-                    workbook_path.read_bytes(),
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            },
-        )
-        assert uploaded.status_code == 200
-        assert uploaded.json()["indexed"][0]["indexed"] is True
-        library = client.get("/api/library").json()
-        assert library["stats"]["documents"] == 1
-        assert library["documents"][0]["type"] == "xlsx"
-        result = client.post("/api/search", json={"query": "spreadsheet retrieval sentinel"})
-        assert result.json()["results"]
-        assert "spreadsheet retrieval sentinel" in result.json()["results"][0]["text"]
+    async def run():
+        transport = httpx.ASGITransport(app=web.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            uploaded = await client.post(
+                "/api/documents",
+                files={
+                    "files": (
+                        "budget.xlsx",
+                        workbook_path.read_bytes(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+            assert uploaded.status_code == 200
+            assert uploaded.json()["indexed"][0]["indexed"] is True
+            library = await client.get("/api/library")
+            library_data = library.json()
+            assert library_data["stats"]["documents"] == 1
+            assert library_data["documents"][0]["type"] == "xlsx"
+            result = await client.post("/api/search", json={"query": "spreadsheet retrieval sentinel"})
+            assert result.json()["results"]
+            assert "spreadsheet retrieval sentinel" in result.json()["results"][0]["text"]
+
+    asyncio.run(run())
 
 
 def test_upload_reports_scanned_pdf_ocr_dependency_problem(tmp_path: Path, monkeypatch):
@@ -234,13 +240,17 @@ def test_upload_reports_scanned_pdf_ocr_dependency_problem(tmp_path: Path, monke
     import mnemosyne.web as web
 
     web = importlib.reload(web)
-    with TestClient(web.app) as client:
-        uploaded = client.post("/api/documents", files={"files": ("scanned.pdf", pdf.read_bytes(), "application/pdf")})
-        payload = uploaded.json()
-        assert payload["indexed"][0]["indexed"] is False
-        assert "missing: pdftoppm, tesseract" in payload["indexed"][0]["diagnostics"][0]["message"]
-        library = client.get("/api/library").json()
-        assert library["stats"]["documents"] == 0
+    async def run():
+        transport = httpx.ASGITransport(app=web.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            uploaded = await client.post("/api/documents", files={"files": ("scanned.pdf", pdf.read_bytes(), "application/pdf")})
+            payload = uploaded.json()
+            assert payload["indexed"][0]["indexed"] is False
+            assert "missing: pdftoppm, tesseract" in payload["indexed"][0]["diagnostics"][0]["message"]
+            library = await client.get("/api/library")
+            assert library.json()["stats"]["documents"] == 0
+
+    asyncio.run(run())
 
 
 def test_watch_scan_indexes_changes_and_removes_deleted_files(tmp_path: Path):
@@ -380,22 +390,27 @@ def test_web_upload_library_search_and_citation_preview(tmp_path: Path, monkeypa
     import mnemosyne.web as web
 
     web = importlib.reload(web)
-    with TestClient(web.app) as client:
-        home = client.get("/")
-        assert home.status_code == 200
-        assert "Upload" in home.text
-        uploaded = client.post(
-            "/api/documents",
-            files={"files": ("notes.md", b"#rag End to end hybrid knowledge search", "text/markdown")},
-        )
-        assert uploaded.status_code == 200
-        assert uploaded.json()["indexed"][0]["indexed"] is True
-        library = client.get("/api/library").json()
-        assert library["stats"]["documents"] == 1
-        result = client.post("/api/search", json={"query": "hybrid knowledge"})
-        assert result.status_code == 200
-        hit = result.json()["results"][0]
-        assert "#L1-L1" in hit["citation"]
-        preview = client.get(f"/api/chunks/{hit['id']}")
-        assert preview.status_code == 200
-        assert "End to end" in preview.json()["text"]
+    transport = httpx.ASGITransport(app=web.app)
+    async def run():
+        transport = httpx.ASGITransport(app=web.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            home = await client.get("/")
+            assert home.status_code == 200
+            assert "Upload" in home.text
+            uploaded = await client.post(
+                "/api/documents",
+                files={"files": ("notes.md", b"#rag End to end hybrid knowledge search", "text/markdown")},
+            )
+            assert uploaded.status_code == 200
+            assert uploaded.json()["indexed"][0]["indexed"] is True
+            library = await client.get("/api/library")
+            assert library.json()["stats"]["documents"] == 1
+            result = await client.post("/api/search", json={"query": "hybrid knowledge"})
+            assert result.status_code == 200
+            hit = result.json()["results"][0]
+            assert "#L1-L1" in hit["citation"]
+            preview = await client.get(f"/api/chunks/{hit['id']}")
+            assert preview.status_code == 200
+            assert "End to end" in preview.json()["text"]
+
+    asyncio.run(run())
