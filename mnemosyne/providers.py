@@ -24,6 +24,8 @@ class Generator(Protocol):
 class VectorStore(Protocol):
     def add(self, ids: Sequence[str], vectors: Sequence[list[float]], metadata: Sequence[dict]) -> None: ...
 
+    def query(self, vector: list[float], limit: int = 20, where: dict | None = None) -> list[tuple[int, float]]: ...
+
 
 class HashingEmbedder:
     """Dependency-free feature hashing baseline; replaceable with neural embeddings."""
@@ -128,8 +130,11 @@ class ChromaVectorAdapter:
     def delete_document(self, path: str) -> None:
         self.collection.delete(where={"document_path": path})
 
-    def query(self, vector: list[float], limit: int = 20) -> list[tuple[int, float]]:
-        result = self.collection.query(query_embeddings=[vector], n_results=limit)
+    def query(self, vector: list[float], limit: int = 20, where: dict | None = None) -> list[tuple[int, float]]:
+        kwargs = {"query_embeddings": [vector], "n_results": limit}
+        if where:
+            kwargs["where"] = where
+        result = self.collection.query(**kwargs)
         ids = (result.get("ids") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
         return [(int(item_id), 1.0 - float(distance)) for item_id, distance in zip(ids, distances)]
