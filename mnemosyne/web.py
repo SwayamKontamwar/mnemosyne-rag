@@ -173,7 +173,16 @@ def upload_documents(files: list[UploadFile] = File(...)) -> dict:
             rejected.append({"name": original, "reason": str(exc)})
             destination.unlink(missing_ok=True)
             continue
-        indexed.append({"name": original, "indexed": bool(count)})
+        diagnostics = [diagnostic.__dict__ for diagnostic in knowledge.store.diagnostics_for_path(str(destination.resolve()))]
+        indexed.append(
+            {
+                "name": original,
+                "indexed": bool(count),
+                "count": count,
+                "skipped": bool(not count),
+                "diagnostics": diagnostics,
+            }
+        )
     return {"indexed": indexed, "rejected": rejected}
 
 
