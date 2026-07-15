@@ -14,7 +14,7 @@ class Settings:
     ollama_model: str = "qwen2.5:7b"
     embed_model: str = "nomic-embed-text"
     embed_provider: str = "ollama"
-    vector_provider: str = "sqlite"
+    vector_provider: str = "chroma"
     watch_interval: float = 2.0
     chunk_size: int = 900
     chunk_overlap: int = 150
@@ -30,7 +30,7 @@ class Settings:
             ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
             embed_model=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
             embed_provider=os.getenv("MNEMO_EMBED_PROVIDER", "ollama"),
-            vector_provider=os.getenv("MNEMO_VECTOR_PROVIDER", "sqlite"),
+            vector_provider=os.getenv("MNEMO_VECTOR_PROVIDER", "chroma"),
             watch_interval=float(os.getenv("MNEMO_WATCH_INTERVAL", "2")),
         )
 
