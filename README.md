@@ -27,6 +27,14 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+Spreadsheet ingestion is included in the normal Python install. Scanned PDF OCR also needs native tools on your machine:
+
+```bash
+brew install poppler tesseract
+```
+
+Without those OCR binaries, text PDFs still index normally, but image-only scanned PDFs will be skipped with a parse diagnostic explaining what is missing. The Docker setup includes the OCR tools for you.
+
 Initialize and index files:
 
 ```bash
@@ -122,7 +130,7 @@ pytest -q
 docker compose build mnemosyne
 ```
 
-The suite covers incremental ingestion, FTS/vector retrieval, Ollama's real HTTP protocol, Chroma persistence, citation repair/validation, watch-folder updates and deletions, safe ZIP imports, backup restoration, structured Office parsing, and the web upload/search/preview flow. The production image includes Poppler and Tesseract; scanned PDFs are OCRed per page and retain page citations.
+The suite covers incremental ingestion, FTS/vector retrieval, Ollama's real HTTP protocol, Chroma persistence, citation repair/validation, watch-folder updates and deletions, safe ZIP imports, backup restoration, structured Office parsing, real spreadsheet upload/search, OCR dependency diagnostics, and the web upload/search/preview flow. The production image includes Poppler and Tesseract; scanned PDFs are OCRed per page and retain page citations.
 
 ## Product milestones
 
