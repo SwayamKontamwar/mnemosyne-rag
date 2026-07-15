@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -210,6 +211,35 @@ class KnowledgeStore:
             for row in ranked[:limit]
         ]
 
+    def keyword_search(self, query: str, limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[int]:
+        terms = [term.replace('"', "") for term in re.findall(r"[a-z0-9_]+", query.lower()) if term.strip()]
+        if not terms:
+            return []
+        expression = " OR ".join(f'"{term}"' for term in terms)
+        filters, params = self._filter_sql(tag=tag, folder=folder, file_type=file_type, alias="d")
+        where = f"AND {' AND '.join(filters)}" if filters else ""
+        rows = self.connection.execute(
+            f"""
+            SELECT c.id, bm25(chunks_fts) rank
+            FROM chunks_fts
+            JOIN chunks c ON c.id = chunks_fts.rowid
+            JOIN documents d ON d.path = c.document_path
+            WHERE chunks_fts MATCH ? {where}
+            ORDER BY rank
+            LIMIT ?
+            """,
+            [expression, *params, limit],
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def vector_search(self, query_vector: list[float], limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[tuple[int, float]]:
+        rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type)
+        scored = [
+            (row["id"], _cosine(query_vector, json.loads(row["vector"])))
+            for row in rows
+        ]
+        return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
+
     def chunks_for_document(self, name: str) -> list[sqlite3.Row]:
         return self.connection.execute(
             "SELECT * FROM chunks WHERE document_path LIKE ? OR title = ?", (f"%{name}%", name)
@@ -315,6 +345,13 @@ class KnowledgeStore:
             SearchHit(item_id, by_id[item_id]["text"], by_id[item_id]["title"], by_id[item_id]["citation"], scores[item_id], tuple(json.loads(by_id[item_id]["tags"] or "[]")))
             for item_id in ids if item_id in by_id
         ]
+
+    def vectors_by_ids(self, ids: list[int]) -> dict[int, list[float]]:
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.connection.execute(f"SELECT id, vector FROM chunks WHERE id IN ({placeholders})", ids).fetchall()
+        return {row["id"]: json.loads(row["vector"]) for row in rows}
 
     def all_chunk_previews(self, exclude_path: str | None = None) -> list[ChunkPreview]:
         rows = self.connection.execute("SELECT * FROM chunks WHERE document_path != ? ORDER BY id" if exclude_path else "SELECT * FROM chunks ORDER BY id", (exclude_path,) if exclude_path else ()).fetchall()
@@ -590,17 +627,7 @@ class KnowledgeStore:
         )
 
     def _chunk_rows(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[sqlite3.Row]:
-        filters = []
-        params: list[object] = []
-        if tag:
-            filters.append("c.tags LIKE ?")
-            params.append(f'%"{tag.lower()}"%')
-        if folder:
-            filters.append("d.folder = ?")
-            params.append(folder)
-        if file_type:
-            filters.append("d.file_type = ?")
-            params.append(file_type)
+        filters, params = self._filter_sql(tag=tag, folder=folder, file_type=file_type)
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         return self.connection.execute(
             f"""
@@ -611,6 +638,21 @@ class KnowledgeStore:
             """,
             params,
         ).fetchall()
+
+    @staticmethod
+    def _filter_sql(tag: str | None = None, folder: str | None = None, file_type: str | None = None, alias: str = "d") -> tuple[list[str], list[object]]:
+        filters = []
+        params: list[object] = []
+        if tag:
+            filters.append("c.tags LIKE ?")
+            params.append(f'%"{tag.lower()}"%')
+        if folder:
+            filters.append(f"{alias}.folder = ?")
+            params.append(folder)
+        if file_type:
+            filters.append(f"{alias}.file_type = ?")
+            params.append(file_type)
+        return filters, params
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
         existing = {
