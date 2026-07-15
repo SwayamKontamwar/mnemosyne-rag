@@ -1,6 +1,7 @@
 import json
 import asyncio
 import importlib
+import re
 from pathlib import Path
 from urllib.request import Request
 from zipfile import ZipFile
@@ -82,6 +83,84 @@ def test_reranking_prefers_term_overlap():
     ]
     reranked = kb._rerank("hybrid retrieval", hits)
     assert reranked[0].chunk_id == 2
+
+
+def test_query_expansion_finds_synonym_matches(tmp_path: Path):
+    class ExpansionGenerator:
+        def generate(self, prompt: str) -> str:
+            if "Rewrite this search query" in prompt:
+                return '{"variations":["vehicle maintenance"],"synonyms":["vehicle","automobile"],"hyde":"Vehicle maintenance notes explain repair work."}'
+            return '{"ranked_ids":[]}'
+
+    note = tmp_path / "garage.md"
+    note.write_text("Vehicle maintenance checklist includes tire pressure and brake inspection.")
+    kb = KnowledgeBase(Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", embed_provider="hash"))
+    kb.ingest(note)
+
+    hits = kb.search("car repair", generator=ExpansionGenerator())
+    assert hits
+    assert hits[0].title == "garage"
+
+
+def test_hyde_embedding_finds_meaning_when_terms_do_not_overlap(tmp_path: Path):
+    class HydeGenerator:
+        def generate(self, prompt: str) -> str:
+            if "Rewrite this search query" in prompt:
+                return '{"variations":[],"synonyms":[],"hyde":"Batteries store energy for later use in portable devices."}'
+            return '{"ranked_ids":[]}'
+
+    note = tmp_path / "energy.md"
+    note.write_text("Batteries store energy for later use in portable devices.")
+    kb = KnowledgeBase(Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", embed_provider="hash"))
+    kb.ingest(note)
+
+    hits = kb.search("where does saved power live?", generator=HydeGenerator())
+    assert hits
+    assert hits[0].title == "energy"
+
+
+def test_qwen_style_reranker_can_put_best_candidate_first(tmp_path: Path):
+    class RerankGenerator:
+        def __init__(self) -> None:
+            self.best_id: int | None = None
+
+        def generate(self, prompt: str) -> str:
+            if "Rewrite this search query" in prompt:
+                return '{"variations":[],"synonyms":[],"hyde":"Citation validation checks whether answers are supported by sources."}'
+            if "Rerank these retrieved note chunks" in prompt:
+                match = re.search(r"(\d+): exact", prompt)
+                self.best_id = int(match.group(1)) if match else None
+                return json.dumps({"ranked_ids": [self.best_id] if self.best_id else []})
+            return "{}"
+
+    generic = tmp_path / "generic.md"
+    generic.write_text("Citation systems list source numbers and document references.")
+    exact = tmp_path / "exact.md"
+    exact.write_text("Exact citation validation checks whether generated answers are supported by retrieved sources.")
+    kb = KnowledgeBase(Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", embed_provider="hash"))
+    kb.ingest(tmp_path)
+
+    hits = kb.search("citation validation support", generator=RerankGenerator())
+    assert hits
+    assert hits[0].title == "exact"
+
+
+def test_mmr_diversifies_near_duplicate_chunks_from_same_note(tmp_path: Path):
+    repeated = tmp_path / "long.md"
+    repeated.write_text(
+        "Hybrid retrieval evaluation should compare keyword and vector search.\n\n"
+        "Hybrid retrieval evaluation should compare keyword and vector search.\n\n"
+        "Hybrid retrieval evaluation should compare keyword and vector search."
+    )
+    related = tmp_path / "related.md"
+    related.write_text("Search evaluation also checks reranking quality and result diversity.")
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", embed_provider="hash", chunk_size=80, chunk_overlap=0)
+    kb = KnowledgeBase(settings)
+    kb.ingest(tmp_path)
+
+    hits = kb.search("hybrid retrieval evaluation search", limit=2)
+    assert len(hits) == 2
+    assert len({hit.citation.split("#", 1)[0] for hit in hits}) == 2
 
 
 def test_citation_validation_flags_missing_and_weak_support(tmp_path: Path):
@@ -367,6 +446,25 @@ def test_chroma_adapter_is_persistent_and_searchable(tmp_path: Path):
     assert kb.ingest(note) == (1, 0)
     assert kb.vector_store is not None
     assert kb.search("Chroma vector retrieval")[0].title == "chroma"
+
+
+def test_chroma_search_uses_index_instead_of_sqlite_vector_scan(tmp_path: Path, monkeypatch):
+    from mnemosyne.providers import HashingEmbedder
+
+    settings = Settings(
+        tmp_path / "data",
+        tmp_path / "data" / "knowledge.db",
+        embed_provider="hash",
+        vector_provider="chroma",
+    )
+    kb = KnowledgeBase(settings, embedder=HashingEmbedder())
+    note = tmp_path / "index.md"
+    note.write_text("Indexed Chroma retrieval should avoid per-query SQLite vector scans.")
+    kb.ingest(note)
+    monkeypatch.setattr(kb.store, "vector_search", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sqlite vector scan used")))
+
+    hits = kb.search("Indexed Chroma retrieval")
+    assert hits[0].title == "index"
 
 
 def test_uncited_model_output_is_repaired_or_safely_grounded(tmp_path: Path):
