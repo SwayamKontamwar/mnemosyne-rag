@@ -49,7 +49,7 @@ async function loadLibrary() {
         <div class="tag-row">${(doc.tags || []).map((tag) => `<button class="tag-chip" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join('')}</div>
       </div>
       <time>${new Date(doc.indexed_at.replace(' ', 'T') + 'Z').toLocaleDateString()}</time>
-    </article>`).join('') : '<p class="empty-state">Your library is empty. Add your first source to begin.</p>';
+    </article>`).join('') : '<p class="empty-state">No files indexed.</p>';
 }
 
 async function uploadFiles(files) {
@@ -60,8 +60,18 @@ async function uploadFiles(files) {
   status.textContent = `Indexing ${files.length} file${files.length === 1 ? '' : 's'}…`;
   try {
     const data = await request('/api/documents', { method: 'POST', body: form });
-    const rejected = data.rejected.length ? ` ${data.rejected.length} unsupported.` : '';
-    status.textContent = `Added ${data.indexed.length} source${data.indexed.length === 1 ? '' : 's'}.${rejected}`;
+    const added = data.indexed.filter((item) => item.indexed).length;
+    const skipped = data.indexed.filter((item) => !item.indexed);
+    const rejected = data.rejected.length ? ` ${data.rejected.length} rejected.` : '';
+    const reasons = [...skipped, ...data.rejected]
+      .map((item) => item.diagnostics?.[0]?.message || item.reason)
+      .filter(Boolean);
+    status.textContent = [
+      `Indexed ${added} source${added === 1 ? '' : 's'}.`,
+      skipped.length ? ` ${skipped.length} had no searchable text.` : '',
+      rejected,
+      reasons.length ? ` ${reasons[0]}` : ''
+    ].join('');
     await refreshAll();
   } catch (error) {
     status.textContent = error.message;
@@ -73,7 +83,7 @@ async function runSearch(query) {
   const panel = $('#search-results');
   panel.hidden = false;
   $('#results-title').textContent = `Results for “${query}”`;
-  $('#results').innerHTML = '<p class="empty-state">Searching your knowledge…</p>';
+  $('#results').innerHTML = '<p class="empty-state">Searching…</p>';
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   try {
     const data = await request('/api/search', {
@@ -101,13 +111,13 @@ async function loadInsights() {
     <article class="graph-edge">
       <div><strong>${escapeHtml(shortName(edge.source))}</strong><span>→</span><strong>${escapeHtml(shortName(edge.target))}</strong></div>
       <small>${Math.round(edge.weight * 100)}% related · ${escapeHtml(edge.reason)}</small>
-    </article>`).join('') : '<p class="empty-state">Add more linked notes to see graph relationships.</p>';
+    </article>`).join('') : '<p class="empty-state">No links yet.</p>';
   $('#clusters').innerHTML = clusters.clusters.length ? clusters.clusters.map((cluster) => `
     <article class="cluster-card">
       <strong>${escapeHtml(cluster.name)}</strong>
       <small>${cluster.documents.length} document${cluster.documents.length === 1 ? '' : 's'}</small>
       <div class="tag-row">${cluster.keywords.map((keyword) => `<span class="mini-tag">${escapeHtml(keyword)}</span>`).join('')}</div>
-    </article>`).join('') : '<p class="empty-state">Clusters will appear as your notes gain stronger themes.</p>';
+    </article>`).join('') : '<p class="empty-state">No clusters yet.</p>';
 }
 
 async function loadSavedSearches() {
@@ -121,7 +131,7 @@ async function loadSavedSearches() {
         data-tag="${escapeHtml(search.tag || '')}"
         data-folder="${escapeHtml(search.folder || '')}"
         data-type="${escapeHtml(search.file_type || '')}">Run search</button>
-    </article>`).join('') : '<p class="empty-state">Saved searches will appear here.</p>';
+    </article>`).join('') : '<p class="empty-state">No saved searches.</p>';
 }
 
 async function loadHistory() {
@@ -130,7 +140,7 @@ async function loadHistory() {
     <article class="graph-edge">
       <div><strong>${escapeHtml(entry.mode.toUpperCase())}</strong></div>
       <small>${escapeHtml(entry.query)}</small>
-    </article>`).join('') : '<p class="empty-state">Recent activity will appear here.</p>';
+    </article>`).join('') : '<p class="empty-state">No history yet.</p>';
 }
 
 async function loadEvaluations() {
@@ -142,7 +152,7 @@ async function loadEvaluations() {
       <article class="graph-edge">
         <div><strong>${escapeHtml(item.verdict)}</strong></div>
         <small>${escapeHtml(item.query)}</small>
-      </article>`).join('')}</div>` : '<p class="empty-state">Run asks to build evaluation history.</p>';
+    </article>`).join('')}</div>` : '<p class="empty-state">No data yet.</p>';
 }
 
 async function loadWatchFolders() {
@@ -151,7 +161,7 @@ async function loadWatchFolders() {
     <article class="graph-edge">
       <div><strong>${escapeHtml(shortName(watch.path))}</strong></div>
       <small>${escapeHtml(watch.profile)} · ${escapeHtml(watch.path)}</small>
-    </article>`).join('') : '<p class="empty-state">No watch folders registered yet.</p>';
+    </article>`).join('') : '<p class="empty-state">No watch folders.</p>';
 }
 
 async function loadSettings() {
@@ -170,11 +180,11 @@ async function loadHealth() {
     state.innerHTML = '<span></span>Ollama ready';
     state.title = `${data.embed_model} + ${data.ollama_model}`;
   } else if (data.ollama.available) {
-    state.innerHTML = '<span></span>Ollama needs models';
-    state.title = 'Run the model pull commands shown in the README.';
+    state.innerHTML = '<span></span>Models missing';
+    state.title = 'Pull the configured Ollama models.';
   } else {
-    state.innerHTML = '<span></span>Search ready · chat offline';
-    state.title = 'Keyword and fallback semantic search work; start Ollama for grounded chat.';
+    state.innerHTML = '<span></span>Search only';
+    state.title = 'Start Ollama for chat.';
   }
 }
 
@@ -182,7 +192,7 @@ async function loadCollections() {
   const data = await request('/api/collections');
   $('#collections').innerHTML = data.collections.length ? data.collections.map((collection) => `
     <article class="graph-edge"><div><strong>${escapeHtml(collection.name)}</strong></div>
-    <small>${escapeHtml((collection.tags || []).join(', ') || collection.query || 'Manual collection')}</small></article>`).join('') : '<p class="empty-state">Collections will appear here.</p>';
+    <small>${escapeHtml((collection.tags || []).join(', ') || collection.query || 'Manual collection')}</small></article>`).join('') : '<p class="empty-state">No collections.</p>';
 }
 
 async function showPreview(chunkId) {
@@ -213,15 +223,15 @@ async function showReader(path) {
       <aside>
         <h4>Related notes</h4>
         <div class="graph-list">${(data.related || []).map((item) => `
-          <article class="graph-edge"><div><strong>${escapeHtml(shortName(item.path))}</strong></div><small>${Math.round(item.weight * 100)}% · ${escapeHtml(item.reason)}</small></article>`).join('') || '<p class="empty-state">No related notes yet.</p>'}</div>
+          <article class="graph-edge"><div><strong>${escapeHtml(shortName(item.path))}</strong></div><small>${Math.round(item.weight * 100)}% · ${escapeHtml(item.reason)}</small></article>`).join('') || '<p class="empty-state">No related notes.</p>'}</div>
         <h4>Entities</h4>
         <div class="tag-row">${(data.entities || []).map((entity) => `<span class="mini-tag">${escapeHtml(entity)}</span>`).join('')}</div>
         <h4>Timeline</h4>
         <div class="graph-list">${(data.timeline || []).map((item) => `
-          <article class="graph-edge"><div><strong>${escapeHtml(item.date)}</strong></div><small>${escapeHtml(item.citation)}</small></article>`).join('') || '<p class="empty-state">No date signals found.</p>'}</div>
+          <article class="graph-edge"><div><strong>${escapeHtml(item.date)}</strong></div><small>${escapeHtml(item.citation)}</small></article>`).join('') || '<p class="empty-state">No dates found.</p>'}</div>
         <h4>Contradictions</h4>
         <div class="graph-list">${(data.contradictions || []).map((item) => `
-          <article class="graph-edge"><div><strong>${escapeHtml(item.left)}</strong></div><small>${escapeHtml(item.right)} · ${escapeHtml(item.shared_terms.join(', '))}</small></article>`).join('') || '<p class="empty-state">No contradiction candidates found.</p>'}</div>
+          <article class="graph-edge"><div><strong>${escapeHtml(item.left)}</strong></div><small>${escapeHtml(item.right)} · ${escapeHtml(item.shared_terms.join(', '))}</small></article>`).join('') || '<p class="empty-state">No contradictions flagged.</p>'}</div>
       </aside>
     </div>`;
   $('#reader-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -251,7 +261,7 @@ function validationDetail(validation) {
   if (validation.verdict === 'missing-citations') return 'The model answered without usable source markers.';
   if (validation.verdict === 'invalid-citations') return `Missing source numbers: ${validation.missing_numbers.join(', ')}.`;
   if (validation.verdict === 'weak-support') return `Potentially weak support for source numbers: ${validation.unsupported_numbers.join(', ')}.`;
-  return 'The answer audit needs review.';
+  return 'Check citations.';
 }
 
 async function refreshAll() {
@@ -274,7 +284,7 @@ $('#ask-form').addEventListener('submit', async (event) => {
   const query = $('#ask-input').value.trim();
   const output = $('#answer');
   output.hidden = false;
-  output.innerHTML = '<p>Reading your sources…</p>';
+  output.innerHTML = '<p>Searching sources…</p>';
   try {
     const data = await request('/api/ask', {
       method: 'POST',
@@ -286,7 +296,7 @@ $('#ask-form').addEventListener('submit', async (event) => {
       <div class="source"><strong>[${source.number}] ${escapeHtml(source.title)}</strong><div class="citation">${escapeHtml(source.citation)}</div><button class="preview-link" data-chunk-id="${source.chunk_id}">Preview source</button></div>`).join('')}</div>`;
     await Promise.all([loadEvaluations(), loadHistory()]);
   } catch (error) {
-    output.innerHTML = `<h3>Couldn’t answer yet</h3><p>${escapeHtml(error.message)}</p>`;
+    output.innerHTML = `<h3>Answer unavailable</h3><p>${escapeHtml(error.message)}</p>`;
   }
 });
 
