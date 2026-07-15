@@ -1,24 +1,98 @@
 # Mnemosyne
 
-Mnemosyne is a local-first personal knowledge base for notes, PDFs, and documents. You can drop in your source material, search it instantly with hybrid retrieval, and ask grounded questions that answer directly from your own library with citations back to the original text.
+Mnemosyne is a local-first, versioned personal knowledge base for your notes, documents, PDFs, spreadsheets, and exports. It lets you drop files into a private library, search across them with hybrid retrieval, ask questions with grounded citations, explore related notes, and time-travel through old versions of your knowledge.
 
-## What the current version does
+Think of it as a Notion-like research workspace crossed with a local RAG engine: fast search, cited answers, document history, and knowledge-graph exploration without sending your library to a hosted app by default.
 
-- Ingests `.md`, `.markdown`, `.txt`, `.pdf`, `.docx`, `.pptx`, `.csv`, `.tsv`, and `.xlsx` sources
-- Tracks content hashes so re-indexing skips unchanged files
-- Stores everything locally in SQLite with FTS5 plus vector search
-- Keeps append-only per-note revision history with `as_of` time-travel search
-- Supports direct search, cited question answering, and semantic backlinks
-- Ships with a browser-based local interface for uploads, library browsing, and chat
-- Keeps provider boundaries clean so local or cloud models can be swapped later
-- Extracts tags, folders, and wiki-style note links for filters and graph features
-- Exposes chunk preview, topic clusters, and lightweight note graph APIs
+## What it does
 
-## Product shape
+- Ingests Markdown, text, PDFs, Word docs, PowerPoint decks, CSV/TSV files, XLSX spreadsheets, and ZIP exports
+- Extracts searchable chunks with exact line or page citations
+- Stores metadata locally in SQLite with FTS5 keyword search
+- Supports vector retrieval through SQLite fallback or persistent Chroma
+- Uses Ollama embeddings and local Ollama answering, with deterministic hash fallback for tests/offline mode
+- Combines keyword, vector, query expansion, HyDE, reciprocal rank fusion, reranking, and MMR diversity
+- Answers questions from retrieved sources and validates citations
+- Tracks folders, tags, file types, links, saved searches, history, collections, entities, timelines, and related notes
+- Keeps append-only document revisions with `as_of` time-travel search
+- Reuses unchanged chunk vectors by content hash during incremental reindexing
+- Exposes a local web UI, CLI, backup/export APIs, watch folders, and Docker setup
 
-The direction is a private, Notion-like research companion rather than a generic chatbot. The system is meant to feel like a durable knowledge workspace: ingest anything important, retrieve exact passages fast, and then build richer layers on top such as clustering, backlinking, topic maps, and graph exploration.
+## Why this exists
 
-## Quick start
+Most personal note systems are good at storing information but weak at answering “what do I know about this?” Most chat-with-your-docs demos are good at answering one-off questions but weak at being a durable knowledge workspace.
+
+Mnemosyne is built around the middle ground:
+
+- You own the files.
+- The index is local.
+- Answers cite the exact source chunks.
+- Old answers can still resolve to the historical revision they used.
+- Search works even when you phrase a query differently from how the note was written.
+- The system is modular enough to swap embedding, vector, storage, and generation providers later.
+
+## Example use cases
+
+### Personal second brain
+
+Drop in notes, meeting logs, PDFs, and research snippets. Search semantically, ask for summaries, and jump back to exact cited passages.
+
+Example:
+
+```bash
+mnemo ingest ~/Notes
+mnemo ask "What have I written about retrieval evaluation?"
+```
+
+### Research assistant
+
+Index papers, slide decks, and project notes. Ask cross-document questions and compare sources while keeping citations visible.
+
+Example:
+
+```bash
+mnemo search "citation validation reranking experiments"
+mnemo ask "Compare my notes on keyword search vs vector search."
+```
+
+### Versioned knowledge archive
+
+Track how your notes changed over time. Query the library as it existed last week, restore an old version without deleting history, or inspect line-level diffs.
+
+Example:
+
+```bash
+mnemo search "old project decision" --as-of "2026-07-14T12:00:00Z"
+mnemo revisions ~/Notes/project.md
+mnemo revisions ~/Notes/project.md --diff 1 3
+mnemo revisions ~/Notes/project.md --restore 1
+```
+
+### Local document search
+
+Use it as a private desktop search layer for messy folders of PDFs, spreadsheets, Word docs, and exports.
+
+Example:
+
+```bash
+mnemo ingest ~/Documents/Research
+mnemo search "spreadsheet retrieval sentinel"
+```
+
+### Obsidian or Notion companion
+
+Watch an Obsidian vault or import a Notion ZIP export, then use semantic search, backlinks, tags, graph connections, and cited Q&A over the imported library.
+
+Example:
+
+```bash
+mnemo watch ~/ObsidianVault --profile obsidian
+mnemo import ~/Downloads/notion-export.zip --profile notion
+```
+
+## Walkthrough
+
+### 1. Install
 
 Requires Python 3.11+.
 
@@ -28,38 +102,23 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Spreadsheet ingestion is included in the normal Python install. Scanned PDF OCR also needs native tools on your machine:
+For development and full parser/test coverage:
+
+```bash
+pip install -e '.[dev,full]'
+```
+
+Spreadsheet ingestion is included in the normal install. Scanned PDF OCR also needs Poppler and Tesseract installed on your machine:
 
 ```bash
 brew install poppler tesseract
 ```
 
-Without those OCR binaries, text PDFs still index normally, but image-only scanned PDFs will be skipped with a parse diagnostic explaining what is missing. The Docker setup includes the OCR tools for you.
+Without those OCR binaries, text PDFs still index normally. Image-only scanned PDFs are skipped with a parse diagnostic explaining which OCR dependency is missing.
 
-Initialize and index files:
+### 2. Start local models
 
-```bash
-mnemo init
-mnemo ingest ~/Notes
-mnemo search "ideas about distributed systems"
-mnemo search "old wording" --as-of "2026-07-14T12:00:00Z"
-mnemo ask "What have I written about retrieval evaluation?"
-mnemo ask "What did I believe then?" --as-of "2026-07-14T12:00:00Z"
-mnemo backlinks "meeting-notes.md"
-mnemo revisions ~/Notes/meeting-notes.md
-mnemo revisions ~/Notes/meeting-notes.md --diff 1 2
-mnemo revisions ~/Notes/meeting-notes.md --restore 1
-```
-
-Run the local web app:
-
-```bash
-mnemo serve
-```
-
-Then open `http://127.0.0.1:8765`.
-
-Mnemosyne now treats local Ollama embeddings as the default happy path. For the strongest local setup, run both an embed model and an answer model:
+Mnemosyne is designed around local Ollama models.
 
 ```bash
 ollama pull nomic-embed-text
@@ -67,28 +126,166 @@ ollama pull qwen2.5:7b
 ollama serve
 ```
 
-The default runtime assumes:
+Default model settings:
 
 ```bash
 export MNEMO_EMBED_PROVIDER=ollama
 export OLLAMA_EMBED_MODEL=nomic-embed-text
 ```
 
-By default Mnemosyne stores data under `.mnemosyne/`. Set `MNEMO_HOME` to move the local database, uploads, and index.
+For a deterministic offline/test mode:
 
-## Product surface
+```bash
+export MNEMO_EMBED_PROVIDER=hash
+export MNEMO_VECTOR_PROVIDER=sqlite
+```
 
-The app now includes:
+### 3. Initialize and ingest
 
-- Drag-and-drop plus watch-folder ingestion
-- Tags, folders, file-type filters, and collections groundwork
-- Search history and saved searches
-- Source-reader views with chunk previews, entities, and simple timelines
-- Citation auditing and an evaluation dashboard
-- Provider and privacy preferences stored locally
-- Backup/export APIs for local data portability
+```bash
+mnemo init
+mnemo ingest ~/Notes
+```
 
-## One-command local run
+You can ingest a single file, a whole folder, or a ZIP export.
+
+Supported source types:
+
+- `.md`, `.markdown`, `.txt`
+- `.pdf`
+- `.docx`
+- `.pptx`
+- `.csv`, `.tsv`, `.xlsx`
+- `.zip` imports for Notion/Obsidian-style exports
+
+### 4. Search
+
+```bash
+mnemo search "ideas about distributed systems"
+```
+
+Search combines keyword and semantic retrieval. It can expand queries, use HyDE-style hypothetical answer matching, fuse keyword/vector rankings, rerank candidates, and diversify near-duplicate chunks.
+
+### 5. Ask with citations
+
+```bash
+mnemo ask "What have I written about retrieval evaluation?"
+```
+
+Answers are built from retrieved chunks and cite source numbers. The citation validator checks whether the answer actually references available sources and can repair or safely ground weak answers.
+
+### 6. Open the web app
+
+```bash
+mnemo serve
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765
+```
+
+The UI includes:
+
+- drag-and-drop uploads
+- document library
+- search and ask panels
+- source reader
+- chunk previews
+- tags, folders, file-type filters
+- saved searches
+- conversation history
+- collections
+- graph and cluster views
+- revision history, diffs, and restore controls
+- provider/privacy settings
+- backup export
+
+### 7. Watch folders
+
+```bash
+mnemo watch ~/Notes --profile local
+mnemo watch --scan
+```
+
+Watch folders support incremental reindexing. Removed files become tombstones so older `as_of` queries can still retrieve their historical chunks.
+
+## Versioned time travel
+
+Mnemosyne does not overwrite indexed knowledge in place. Every changed file creates a new immutable document revision with a monotonic version number and timestamp.
+
+Each chunk stores:
+
+- document path
+- revision id
+- document version
+- content hash
+- `valid_from`
+- `valid_to`
+- line or page citation
+
+When a file changes, Mnemosyne diffs the new chunk set against currently active chunks by content hash. Unchanged chunk text keeps its existing vector; changed chunks get embedded once; removed chunks receive `valid_to` instead of being hard-deleted.
+
+Deletes create tombstone revisions. Rollback writes a new revision whose content matches an older one, preserving the full history chain.
+
+### Query as of an old date
+
+```bash
+mnemo search "old wording" --as-of "2026-07-14T12:00:00Z"
+mnemo ask "What did I believe then?" --as-of "2026-07-14T12:00:00Z"
+```
+
+Without `--as-of`, search means “latest.” With `--as-of`, candidates are filtered to chunks whose validity window contains that timestamp.
+
+### Inspect and restore history
+
+```bash
+mnemo revisions ~/Notes/meeting-notes.md
+mnemo revisions ~/Notes/meeting-notes.md --diff 1 2
+mnemo revisions ~/Notes/meeting-notes.md --restore 1
+```
+
+Historical citations resolve against the old chunk text, so an old answer’s source preview does not drift when the note changes later.
+
+## API examples
+
+Search as of a point in time:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"old phrase","as_of":"2026-07-14T12:00:00Z"}'
+```
+
+View revision history:
+
+```bash
+curl 'http://127.0.0.1:8765/api/revisions?path=/absolute/path/to/note.md'
+```
+
+Diff two revisions:
+
+```bash
+curl 'http://127.0.0.1:8765/api/revisions/diff?path=/absolute/path/to/note.md&left=1&right=2'
+```
+
+Restore a historical revision:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/revisions/restore \
+  -H 'content-type: application/json' \
+  -d '{"path":"/absolute/path/to/note.md","version":1}'
+```
+
+Resolve a historical citation:
+
+```bash
+curl --get http://127.0.0.1:8765/api/citations/resolve \
+  --data-urlencode 'citation=/absolute/path/to/note.md?rev=1#L1-L3'
+```
+
+## Docker
 
 You can run the complete local stack in Docker. This starts Mnemosyne, persistent Chroma, Ollama, OCR tooling, and a one-time model downloader:
 
@@ -96,67 +293,43 @@ You can run the complete local stack in Docker. This starts Mnemosyne, persisten
 docker compose up --build
 ```
 
-Then open `http://127.0.0.1:8765`.
+Then open:
 
-The first launch downloads `nomic-embed-text` and `qwen2.5:3b` (roughly 2.2 GB total), so model-backed chat becomes ready after those downloads finish. The header reports `Ollama ready` when both models are available. Set `MNEMO_PORT=9000` before the command if port 8765 is occupied.
+```text
+http://127.0.0.1:8765
+```
+
+The first launch downloads local models, so model-backed chat becomes ready after those downloads finish. Set `MNEMO_PORT=9000` before the command if port `8765` is occupied.
 
 ## Architecture
 
 ```text
-documents -> parser -> chunker -> embedder -> SQLite chunks + FTS + vectors
-                                                  |
-query -----> embedder -> hybrid retriever --------+
-                              |
-                         cited context -> generator -> grounded answer
+files / folders / uploads
+        |
+        v
+parser -> structure-aware documents -> chunks -> embeddings
+        |                                  |
+        v                                  v
+SQLite metadata + revisions + FTS5     SQLite vectors or Chroma
+        |                                  |
+        +----------- hybrid retrieval -----+
+                         |
+                         v
+                reranked cited context
+                         |
+                         v
+                  local Ollama answer
 ```
 
-Current defaults favor simplicity with a path to a much richer local product:
+Core components:
 
-- Storage: local SQLite for metadata and FTS5, with SQLite vectors by default or persistent Chroma via `MNEMO_VECTOR_PROVIDER=chroma`
-- Embeddings: Ollama `nomic-embed-text` by default, with an explicit deterministic hash fallback when Ollama is offline
-- Generation: Ollama for private local answering
-- UI: FastAPI plus static HTML/CSS/JS for a fast local dashboard
-- Metadata: folders, tags, wiki-links, and source types for collections and filters
-
-The UI reports whether real Ollama embeddings are active, whether fallback search is being used, and whether the configured answer model is ready.
-
-## Versioned time travel
-
-Mnemosyne does not overwrite indexed knowledge in place. Every changed file creates a new immutable document revision with a monotonic version number and timestamp. Chunks have `valid_from` and `valid_to` windows, deletes become tombstone revisions, and unchanged chunk text is matched by content hash so its existing vector is reused instead of embedded again.
-
-Search and ask accept an optional `as_of` timestamp. Without it, results mean “latest.” With it, FTS, SQLite vector fallback, and Chroma metadata filters restrict candidates to chunks that were live at that instant. Citations include the document path, revision, and line/page target, so a citation from an old answer resolves to the historical chunk text even after the source file changes later.
-
-You can test it from the UI:
-
-1. Run `mnemo serve` and upload or watch a note.
-2. Search for text from revision 1 and copy the result citation.
-3. Edit the note, re-index it, and search again with the top-bar `As of` timestamp set to the first revision time.
-4. Open the source from the library to view revision history, line diffs, and restore buttons.
-5. Restore an older revision; Mnemosyne writes a new revision with the older content instead of deleting history.
-
-API checks:
-
-```bash
-curl -X POST http://127.0.0.1:8765/api/search \
-  -H 'content-type: application/json' \
-  -d '{"query":"old phrase","as_of":"2026-07-14T12:00:00Z"}'
-
-curl 'http://127.0.0.1:8765/api/revisions?path=/absolute/path/to/note.md'
-curl 'http://127.0.0.1:8765/api/revisions/diff?path=/absolute/path/to/note.md&left=1&right=2'
-curl -X POST http://127.0.0.1:8765/api/revisions/restore \
-  -H 'content-type: application/json' \
-  -d '{"path":"/absolute/path/to/note.md","version":1}'
-curl --get http://127.0.0.1:8765/api/citations/resolve \
-  --data-urlencode 'citation=/absolute/path/to/note.md?rev=1#L1-L3'
-```
-
-## Completed product layer
-
-1. Strong local Ollama embeddings with observable fallback state
-2. Citations that deep-link into exact chunk and page previews
-3. Folders, tags, source filters, and collections
-4. Semantic connections, clustering, related notes, and graph exploration
-5. Continuous watch folders plus safe Notion and Obsidian ZIP imports
+- `mnemosyne/ingest.py`: file discovery, parsing, OCR fallback, chunking
+- `mnemosyne/store.py`: SQLite schema, FTS5, revisions, validity windows, backup/restore
+- `mnemosyne/service.py`: ingestion orchestration, search, RAG, reranking, graph intelligence
+- `mnemosyne/providers.py`: Ollama, Chroma, hash fallback providers
+- `mnemosyne/web.py`: FastAPI app and JSON APIs
+- `mnemosyne/static/`: local browser UI
+- `mnemosyne/cli.py`: command-line interface
 
 ## Verification
 
@@ -166,7 +339,34 @@ pytest -q
 docker compose build mnemosyne
 ```
 
-The suite covers incremental ingestion, time-travel search, tombstone deletes, historical citation resolution, rollback-as-new-revision, chunk-vector reuse by content hash, FTS/vector retrieval, Ollama's real HTTP protocol, Chroma persistence, citation repair/validation, watch-folder updates and deletions, safe ZIP imports, backup restoration, structured Office parsing, real spreadsheet upload/search, OCR dependency diagnostics, and the web upload/search/preview flow. The production image includes Poppler and Tesseract; scanned PDFs are OCRed per page and retain page citations.
+The test suite covers:
+
+- incremental ingestion
+- time-travel search
+- tombstone deletes
+- historical citation resolution
+- rollback-as-new-revision
+- chunk vector reuse by content hash
+- FTS/vector retrieval
+- Ollama HTTP protocol behavior
+- Chroma persistence and indexed search
+- citation repair/validation
+- watch-folder updates and deletions
+- safe ZIP imports
+- backup restoration
+- Office parsing
+- real spreadsheet upload/search
+- OCR dependency diagnostics
+- web upload/search/preview flow
+
+## Completed product layer
+
+1. Strong local Ollama embeddings with observable fallback state
+2. Citations that deep-link into exact chunk and page previews
+3. Folders, tags, source filters, saved searches, history, and collections
+4. Semantic connections, clustering, related notes, entities, and graph exploration
+5. Watch folders plus safe Notion and Obsidian import flows
+6. Versioned time-travel search, historical citations, diffs, and rollback
 
 ## Product milestones
 
@@ -186,6 +386,9 @@ The suite covers incremental ingestion, time-travel search, tombstone deletes, h
 - Ollama embeddings
 - Chroma adapter
 - Hybrid retrieval
+- Query expansion and HyDE
+- Reciprocal rank fusion
+- MMR diversity
 - Local reranking
 - Grounded Ollama answers
 - Citation validation
@@ -194,7 +397,7 @@ The suite covers incremental ingestion, time-travel search, tombstone deletes, h
 ### Milestone 3 — Broad document support
 
 - DOCX, PowerPoint and spreadsheets
-- OCR for scanned PDFs
+- OCR diagnostics for scanned PDFs
 - Structure-aware chunking
 - Folder imports
 - File-system watcher
