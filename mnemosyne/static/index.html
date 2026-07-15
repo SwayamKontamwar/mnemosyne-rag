@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A private, local-first home for your notes and documents.">
-  <title>Mnemosyne — Personal knowledge, recalled</title>
+  <meta name="description" content="Local search and chat for your notes and documents.">
+  <title>Mnemosyne</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
@@ -40,20 +40,20 @@
 
       <div class="content">
         <section id="home" class="hero" data-section="home">
-          <p class="eyebrow">YOUR PRIVATE KNOWLEDGE SPACE</p>
-          <h1>Everything you know,<br><em>ready when you need it.</em></h1>
-          <p class="hero-copy">Bring together your notes, research, and documents. Find exact passages or ask questions and get answers grounded in your own sources.</p>
+          <p class="eyebrow">LOCAL KNOWLEDGE</p>
+          <h1>Search your notes.<br><em>Ask with citations.</em></h1>
+          <p class="hero-copy">Index files, search passages, and answer questions from your own library.</p>
         </section>
 
         <section class="ask-panel" aria-labelledby="ask-heading">
           <div class="ask-heading-row">
-            <div><span class="spark">✦</span><div><h2 id="ask-heading">Ask your knowledge</h2><p>Answers include references to your original sources.</p></div></div>
+            <div><span class="spark">✦</span><div><h2 id="ask-heading">Ask</h2><p>Answers cite your files.</p></div></div>
             <span class="local-pill">LOCAL</span>
           </div>
           <form id="ask-form">
             <textarea id="ask-input" rows="3" placeholder="What have I written about…" required></textarea>
             <div class="ask-actions">
-              <span id="ask-hint">Try “Summarize my notes on retrieval”</span>
+              <span id="ask-hint">Example: “Summarize my retrieval notes”</span>
               <button type="submit">Ask <span>→</span></button>
             </div>
           </form>
@@ -72,21 +72,21 @@
               <label><span>Type</span><select id="type-filter"><option value="">All types</option></select></label>
             </div>
             <div id="stats" class="stats" aria-label="Library statistics"></div>
-            <div id="documents" class="documents"><p class="empty-state">Your library is empty. Add your first source to begin.</p></div>
+            <div id="documents" class="documents"><p class="empty-state">No files indexed.</p></div>
           </div>
 
           <div id="connections" class="drop-panel" data-section="connections">
-            <div class="section-heading"><div><p class="eyebrow">ADD KNOWLEDGE</p><h2>Drop something in</h2></div></div>
+            <div class="section-heading"><div><p class="eyebrow">ADD FILES</p><h2>Upload</h2></div></div>
             <label id="drop-zone" class="drop-zone">
               <input id="file-input" type="file" multiple accept=".md,.markdown,.txt,.pdf,.docx,.pptx,.csv,.tsv,.xlsx,.zip">
               <span class="drop-icon">↓</span>
               <strong>Drop files here</strong>
               <span>or click to choose</span>
-              <small>Markdown, text, PDF, Office docs, spreadsheets, Notion and Obsidian ZIP exports</small>
+              <small>Markdown, text, PDF, Office docs, spreadsheets, ZIP exports</small>
             </label>
             <div id="upload-status" class="upload-status" aria-live="polite"></div>
             <div class="watcher-form">
-              <input id="watch-path" type="text" placeholder="Register a local folder to watch">
+              <input id="watch-path" type="text" placeholder="Folder to watch">
               <select id="watch-profile">
                 <option value="local">Local</option>
                 <option value="obsidian">Obsidian</option>
@@ -111,35 +111,35 @@
           </div>
 
           <div class="cluster-panel" data-section="settings">
-            <div class="section-heading"><div><p class="eyebrow">TOPIC CLUSTERS</p><h2>Emerging themes</h2></div></div>
+            <div class="section-heading"><div><p class="eyebrow">TOPIC CLUSTERS</p><h2>Clusters</h2></div></div>
             <div id="clusters" class="cluster-list"><p class="empty-state">Clusters will appear here.</p></div>
           </div>
         </section>
 
         <section class="insight-grid">
           <div class="graph-panel">
-            <div class="section-heading"><div><p class="eyebrow">SAVED SEARCHES</p><h2>Reusable retrievals</h2></div></div>
+            <div class="section-heading"><div><p class="eyebrow">SAVED SEARCHES</p><h2>Saved searches</h2></div></div>
             <form id="saved-search-form" class="inline-form">
               <input id="saved-search-name" type="text" placeholder="Search name" required>
-              <button type="submit">Save current search</button>
+              <button type="submit">Save search</button>
             </form>
             <div id="saved-searches" class="graph-list"><p class="empty-state">Saved searches will appear here.</p></div>
           </div>
 
           <div class="cluster-panel">
-            <div class="section-heading"><div><p class="eyebrow">EVALUATION DASHBOARD</p><h2>Grounding health</h2></div></div>
-            <div id="evaluation-dashboard" class="cluster-list"><p class="empty-state">Run searches and asks to build evaluation history.</p></div>
+            <div class="section-heading"><div><p class="eyebrow">EVALUATION DASHBOARD</p><h2>Answer quality</h2></div></div>
+            <div id="evaluation-dashboard" class="cluster-list"><p class="empty-state">No data yet.</p></div>
           </div>
         </section>
 
         <section class="insight-grid">
           <div class="graph-panel">
-            <div class="section-heading"><div><p class="eyebrow">CONVERSATION HISTORY</p><h2>Recent retrieval activity</h2></div></div>
-            <div id="history" class="graph-list"><p class="empty-state">Search and ask history will appear here.</p></div>
+            <div class="section-heading"><div><p class="eyebrow">CONVERSATION HISTORY</p><h2>History</h2></div></div>
+            <div id="history" class="graph-list"><p class="empty-state">No history yet.</p></div>
           </div>
 
           <div class="cluster-panel">
-            <div class="section-heading"><div><p class="eyebrow">PROVIDER SETTINGS</p><h2>Local defaults</h2></div></div>
+            <div class="section-heading"><div><p class="eyebrow">PROVIDER SETTINGS</p><h2>Settings</h2></div></div>
             <form id="settings-form" class="settings-form">
               <label><span>Embedding provider</span><select id="setting-embed-provider"><option value="ollama">Ollama</option><option value="hash">Hash fallback</option></select></label>
               <label><span>Vector index</span><select id="setting-vector-provider"><option value="sqlite">SQLite vectors</option><option value="chroma">Chroma</option></select></label>
@@ -153,7 +153,7 @@
 
         <section class="insight-grid">
           <div class="graph-panel">
-            <div class="section-heading"><div><p class="eyebrow">COLLECTIONS</p><h2>Curated knowledge</h2></div></div>
+            <div class="section-heading"><div><p class="eyebrow">COLLECTIONS</p><h2>Collections</h2></div></div>
             <form id="collection-form" class="inline-form">
               <input id="collection-name" type="text" placeholder="Collection name" required>
               <input id="collection-tags" type="text" placeholder="tags, comma separated">
@@ -162,8 +162,8 @@
             <div id="collections" class="graph-list"><p class="empty-state">Collections will appear here.</p></div>
           </div>
           <div class="cluster-panel">
-            <div class="section-heading"><div><p class="eyebrow">PORTABILITY</p><h2>Your data stays yours</h2></div></div>
-            <p class="hero-copy">Export a complete local backup including indexed chunks, settings, saved searches, and history.</p>
+            <div class="section-heading"><div><p class="eyebrow">PORTABILITY</p><h2>Backup</h2></div></div>
+            <p class="hero-copy">Export your library, settings, saved searches, and history.</p>
             <a class="quiet-button" href="/api/backup" download="mnemosyne-backup.json">Download backup</a>
           </div>
         </section>
