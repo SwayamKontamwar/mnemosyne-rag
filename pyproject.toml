@@ -8,6 +8,7 @@ version = "0.2.0"
 description = "A local-first personal knowledge base with hybrid search and cited RAG"
 requires-python = ">=3.11"
 dependencies = [
+    "chromadb>=0.5",
     "fastapi>=0.115",
     "openpyxl>=3.1",
     "pypdf>=5.0",
