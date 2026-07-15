@@ -21,11 +21,17 @@ def parser() -> argparse.ArgumentParser:
     search.add_argument("--tag")
     search.add_argument("--folder")
     search.add_argument("--type", dest="file_type")
+    search.add_argument("--as-of", dest="as_of", help="ISO timestamp for time-travel search, e.g. 2026-07-14T12:00:00Z")
     ask = commands.add_parser("ask", help="Answer from notes through Ollama")
     ask.add_argument("query")
     ask.add_argument("--tag")
     ask.add_argument("--folder")
     ask.add_argument("--type", dest="file_type")
+    ask.add_argument("--as-of", dest="as_of", help="ISO timestamp for time-travel answering")
+    revisions = commands.add_parser("revisions", help="Show or restore document revision history")
+    revisions.add_argument("path")
+    revisions.add_argument("--diff", nargs=2, type=int, metavar=("LEFT", "RIGHT"))
+    revisions.add_argument("--restore", type=int, metavar="VERSION")
     links = commands.add_parser("backlinks", help="Find semantically related notes")
     links.add_argument("document")
     links.add_argument("--limit", type=int, default=10)
@@ -57,7 +63,7 @@ def main() -> None:
         indexed, skipped = kb.ingest(args.path.expanduser())
         print(f"Indexed {indexed} file(s); skipped {skipped} unchanged file(s).")
     elif args.command == "search":
-        _print_hits(kb.search(args.query, args.limit, tag=args.tag, folder=args.folder, file_type=args.file_type))
+        _print_hits(kb.search(args.query, args.limit, tag=args.tag, folder=args.folder, file_type=args.file_type, as_of=args.as_of))
     elif args.command == "backlinks":
         _print_hits(kb.backlinks(args.document, args.limit))
     elif args.command == "ask":
@@ -67,12 +73,24 @@ def main() -> None:
             tag=args.tag,
             folder=args.folder,
             file_type=args.file_type,
+            as_of=args.as_of,
         )
         print(answer)
         print(f"\nAudit: {validation.verdict}")
         print("\nSources:")
         for index, hit in enumerate(hits, 1):
             print(f"[{index}] {hit.citation}")
+    elif args.command == "revisions":
+        path = str(Path(args.path).expanduser().resolve())
+        if args.restore:
+            indexed, skipped = kb.restore_revision(path, args.restore)
+            print(f"Restored v{args.restore} as a new revision; indexed {indexed}, skipped {skipped}.")
+        elif args.diff:
+            print(kb.revision_diff(path, args.diff[0], args.diff[1])["diff"])
+        else:
+            for revision in kb.revision_history(path):
+                state = "deleted" if revision["tombstone"] else "saved"
+                print(f"v{revision['version']}  {revision['created_at']}  {state}  {revision['digest'][:10]}")
     elif args.command == "watch":
         if args.daemon:
             print(f"Watching registered folders every {args.interval:g}s. Press Ctrl+C to stop.")

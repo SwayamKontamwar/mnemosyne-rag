@@ -1,6 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
-const state = { tag: '', folder: '', fileType: '', lastQuery: '' };
+const state = { tag: '', folder: '', fileType: '', lastQuery: '', currentReaderPath: '' };
 
 const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
@@ -17,8 +17,14 @@ function currentFilters() {
   return {
     tag: $('#tag-filter')?.value || null,
     folder: $('#folder-filter')?.value || null,
-    file_type: $('#type-filter')?.value || null
+    file_type: $('#type-filter')?.value || null,
+    as_of: currentAsOf()
   };
+}
+
+function currentAsOf() {
+  const value = $('#as-of-input')?.value;
+  return value ? new Date(value).toISOString() : null;
 }
 
 function queryString(filters = currentFilters()) {
@@ -82,7 +88,8 @@ async function runSearch(query) {
   state.lastQuery = query;
   const panel = $('#search-results');
   panel.hidden = false;
-  $('#results-title').textContent = `Results for “${query}”`;
+  const asOf = currentAsOf();
+  $('#results-title').textContent = asOf ? `Results for “${query}” as of ${new Date(asOf).toLocaleString()}` : `Results for “${query}”`;
   $('#results').innerHTML = '<p class="empty-state">Searching…</p>';
   panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   try {
@@ -96,7 +103,7 @@ async function runSearch(query) {
         <div class="result-head"><strong>${escapeHtml(hit.title)}</strong><span>${Math.max(0, Math.round(hit.score * 100))}% match</span></div>
         <p>${escapeHtml(hit.text.slice(0, 520))}${hit.text.length > 520 ? '…' : ''}</p>
         <div class="tag-row">${(hit.tags || []).map((tag) => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</div>
-        <div class="citation">${escapeHtml(hit.citation)}</div>
+        <div class="citation">${escapeHtml(hit.citation)} · rev ${escapeHtml(hit.revision || 1)}</div>
         <button class="preview-link" data-chunk-id="${hit.id}">Open cited chunk</button>
       </article>`).join('') : '<p class="empty-state">No matching passages found.</p>';
     await loadHistory();
@@ -202,6 +209,8 @@ async function showPreview(chunkId) {
   $('#preview-body').innerHTML = `
     <div class="preview-meta">
       <span class="mini-tag">${escapeHtml(data.citation)}</span>
+      <span class="mini-tag">rev ${escapeHtml(data.revision || 1)}</span>
+      ${data.valid_to ? `<span class="mini-tag">historical</span>` : '<span class="mini-tag">current</span>'}
       ${(data.tags || []).map((tag) => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}
     </div>
     <pre>${escapeHtml(data.text)}</pre>`;
@@ -209,18 +218,36 @@ async function showPreview(chunkId) {
 }
 
 async function showReader(path) {
-  const data = await request(`/api/reader?path=${encodeURIComponent(path)}`);
+  state.currentReaderPath = path;
+  const [data, history] = await Promise.all([
+    request(`/api/reader?path=${encodeURIComponent(path)}`),
+    request(`/api/revisions?path=${encodeURIComponent(path)}`)
+  ]);
   $('#reader-panel').hidden = false;
   $('#reader-title').textContent = data.document?.title || shortName(path);
+  const revisions = history.revisions || [];
   $('#reader-body').innerHTML = `
     <div class="preview-meta">${(data.document?.tags || []).map((tag) => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</div>
     <div class="reader-grid">
       <div>${(data.chunks || []).map((chunk) => `
-        <article class="reader-chunk">
-          <div class="citation">${escapeHtml(chunk.citation)}</div>
+          <article class="reader-chunk">
+          <div class="citation">${escapeHtml(chunk.citation)} · rev ${escapeHtml(chunk.document_version || 1)}</div>
           <pre>${escapeHtml(chunk.text)}</pre>
         </article>`).join('')}</div>
       <aside>
+        <h4>History</h4>
+        <div class="history-tools">
+          <select id="diff-left">${revisions.map((revision) => `<option value="${revision.version}">v${revision.version}</option>`).join('')}</select>
+          <select id="diff-right">${revisions.map((revision, index) => `<option value="${revision.version}" ${index === 0 ? 'selected' : ''}>v${revision.version}</option>`).join('')}</select>
+          <button id="diff-revisions" class="quiet-button" type="button">Diff</button>
+        </div>
+        <div id="revision-diff" class="diff-output" hidden></div>
+        <div class="graph-list">${revisions.map((revision) => `
+          <article class="graph-edge">
+            <div><strong>v${escapeHtml(revision.version)}</strong><span>${revision.tombstone ? 'Deleted' : 'Saved'}</span></div>
+            <small>${new Date(revision.created_at).toLocaleString()} · ${escapeHtml(revision.digest.slice(0, 10))}</small>
+            ${revision.tombstone ? '' : `<button class="preview-link restore-revision" data-version="${revision.version}">Restore this version</button>`}
+          </article>`).join('') || '<p class="empty-state">No revisions yet.</p>'}</div>
         <h4>Related notes</h4>
         <div class="graph-list">${(data.related || []).map((item) => `
           <article class="graph-edge"><div><strong>${escapeHtml(shortName(item.path))}</strong></div><small>${Math.round(item.weight * 100)}% · ${escapeHtml(item.reason)}</small></article>`).join('') || '<p class="empty-state">No related notes.</p>'}</div>
@@ -289,7 +316,7 @@ $('#ask-form').addEventListener('submit', async (event) => {
     const data = await request('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, ...currentFilters() })
+    body: JSON.stringify({ query, ...currentFilters() })
     });
     output.innerHTML = `<div class="validation-strip ${escapeHtml(data.validation.verdict)}"><strong>${escapeHtml(validationLabel(data.validation.verdict))}</strong><span>${escapeHtml(validationDetail(data.validation))}</span></div>
     <h3>Answer</h3><p>${escapeHtml(data.answer).replace(/\n/g, '<br>')}</p><div class="sources">${data.sources.map((source) => `
@@ -350,6 +377,27 @@ document.addEventListener('click', async (event) => {
   const documentRow = event.target.closest('.document-row');
   if (documentRow && !event.target.closest('.tag-chip')) {
     await showReader(documentRow.dataset.documentPath);
+  }
+
+  const diffButton = event.target.closest('#diff-revisions');
+  if (diffButton && state.currentReaderPath) {
+    const left = $('#diff-left').value;
+    const right = $('#diff-right').value;
+    const data = await request(`/api/revisions/diff?path=${encodeURIComponent(state.currentReaderPath)}&left=${left}&right=${right}`);
+    $('#revision-diff').hidden = false;
+    $('#revision-diff').innerHTML = `<pre>${escapeHtml(data.diff || 'No line changes.')}</pre>`;
+  }
+
+  const restoreButton = event.target.closest('.restore-revision');
+  if (restoreButton && state.currentReaderPath) {
+    if (!confirm(`Restore revision ${restoreButton.dataset.version}? This writes a new revision; history stays intact.`)) return;
+    await request('/api/revisions/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.currentReaderPath, version: Number(restoreButton.dataset.version) })
+    });
+    await refreshAll();
+    await showReader(state.currentReaderPath);
   }
 });
 

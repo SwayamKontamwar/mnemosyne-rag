@@ -5,6 +5,9 @@ import math
 import re
 import sqlite3
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from difflib import unified_diff
+from hashlib import sha256
 from pathlib import Path
 from typing import Iterable
 
@@ -26,13 +29,28 @@ class KnowledgeStore:
             CREATE TABLE IF NOT EXISTS documents (
                 path TEXT PRIMARY KEY, digest TEXT NOT NULL, indexed_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 title TEXT DEFAULT '', source_type TEXT DEFAULT 'file', file_type TEXT DEFAULT 'txt',
-                folder TEXT DEFAULT 'root', tags TEXT DEFAULT '[]', links TEXT DEFAULT '[]'
+                folder TEXT DEFAULT 'root', tags TEXT DEFAULT '[]', links TEXT DEFAULT '[]',
+                document_id TEXT DEFAULT '', deleted_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS document_revisions (
+                id INTEGER PRIMARY KEY,
+                document_path TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                digest TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                tombstone INTEGER DEFAULT 0,
+                metadata TEXT DEFAULT '{}',
+                UNIQUE(document_path, version),
+                FOREIGN KEY(document_path) REFERENCES documents(path)
             );
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY, document_path TEXT NOT NULL, title TEXT NOT NULL,
                 text TEXT NOT NULL, ordinal INTEGER NOT NULL, citation TEXT NOT NULL,
                 vector TEXT NOT NULL, tags TEXT DEFAULT '[]',
                 start_line INTEGER, end_line INTEGER, page INTEGER,
+                revision_id INTEGER, document_version INTEGER DEFAULT 1,
+                content_hash TEXT DEFAULT '', valid_from TEXT, valid_to TEXT,
                 FOREIGN KEY(document_path) REFERENCES documents(path)
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -108,6 +126,8 @@ class KnowledgeStore:
                 "folder": "TEXT DEFAULT 'root'",
                 "tags": "TEXT DEFAULT '[]'",
                 "links": "TEXT DEFAULT '[]'",
+                "document_id": "TEXT DEFAULT ''",
+                "deleted_at": "TEXT",
             },
         )
         self._ensure_columns(
@@ -117,22 +137,60 @@ class KnowledgeStore:
                 "start_line": "INTEGER",
                 "end_line": "INTEGER",
                 "page": "INTEGER",
+                "revision_id": "INTEGER",
+                "document_version": "INTEGER DEFAULT 1",
+                "content_hash": "TEXT DEFAULT ''",
+                "valid_from": "TEXT",
+                "valid_to": "TEXT",
             },
         )
+        self._backfill_revisions()
         self.connection.commit()
 
     def digest_for(self, path: str) -> str | None:
-        row = self.connection.execute("SELECT digest FROM documents WHERE path = ?", (path,)).fetchone()
+        row = self.connection.execute("SELECT digest FROM documents WHERE path = ? AND deleted_at IS NULL", (path,)).fetchone()
         return row["digest"] if row else None
 
-    def replace_document(self, path: str, digest: str, chunks: Iterable[tuple[Chunk, list[float]]], metadata: dict) -> list[int]:
+    def active_vectors_by_hash(self, path: str) -> dict[str, list[list[float]]]:
+        rows = self.connection.execute(
+            "SELECT content_hash, vector FROM chunks WHERE document_path = ? AND valid_to IS NULL",
+            (path,),
+        ).fetchall()
+        vectors: dict[str, list[list[float]]] = defaultdict(list)
+        for row in rows:
+            if row["content_hash"]:
+                vectors[row["content_hash"]].append(json.loads(row["vector"]))
+        return dict(vectors)
+
+    def replace_document(self, path: str, digest: str, chunks: Iterable[tuple[Chunk, list[float]]], metadata: dict) -> dict:
         prepared = list(chunks)
+        now = _utc_now()
+        content = str(metadata.get("content") or "\n\n".join(chunk.text for chunk, _ in prepared))
+        version = self._next_version(path)
+        document_id = self._document_id(path)
+        revision_metadata = {
+            "title": metadata["title"],
+            "source_type": metadata["source_type"],
+            "file_type": metadata["file_type"],
+            "folder": metadata["folder"],
+            "tags": list(metadata["tags"]),
+            "links": list(metadata["links"]),
+        }
+        active_rows = self.connection.execute(
+            "SELECT * FROM chunks WHERE document_path = ? AND valid_to IS NULL ORDER BY ordinal",
+            (path,),
+        ).fetchall()
+        active_by_hash: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in active_rows:
+            active_by_hash[row["content_hash"] or _content_hash(row["text"])].append(row)
+        reused_ids: list[int] = []
+        inserted: list[tuple[int, list[float], dict]] = []
+        closed: list[tuple[int, list[float], dict]] = []
         with self.connection:
-            self.connection.execute("DELETE FROM chunks WHERE document_path = ?", (path,))
             self.connection.execute(
                 """
-                INSERT INTO documents(path, digest, title, source_type, file_type, folder, tags, links)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO documents(path, digest, title, source_type, file_type, folder, tags, links, document_id, deleted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(path) DO UPDATE SET
                     digest=excluded.digest,
                     title=excluded.title,
@@ -141,6 +199,8 @@ class KnowledgeStore:
                     folder=excluded.folder,
                     tags=excluded.tags,
                     links=excluded.links,
+                    document_id=COALESCE(NULLIF(documents.document_id, ''), excluded.document_id),
+                    deleted_at=NULL,
                     indexed_at=CURRENT_TIMESTAMP
                 """,
                 (
@@ -152,42 +212,116 @@ class KnowledgeStore:
                     metadata["folder"],
                     json.dumps(metadata["tags"]),
                     json.dumps(metadata["links"]),
+                    document_id,
                 ),
             )
-            self.connection.executemany(
+            cursor = self.connection.execute(
                 """
-                INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO document_revisions(document_path, version, digest, content, created_at, tombstone, metadata)
+                VALUES (?, ?, ?, ?, ?, 0, ?)
                 """,
                 (
-                    (
-                        c.document_path,
-                        c.title,
-                        c.text,
-                        c.ordinal,
-                        c.citation,
-                        json.dumps(v),
-                        json.dumps(c.tags),
-                        c.start_line,
-                        c.end_line,
-                        c.page,
-                    )
-                    for c, v in prepared
+                    path,
+                    version,
+                    digest,
+                    content,
+                    now,
+                    json.dumps(revision_metadata),
                 ),
             )
-        return [row["id"] for row in self.connection.execute("SELECT id FROM chunks WHERE document_path = ? ORDER BY ordinal", (path,))]
+            revision_id = int(cursor.lastrowid)
+            for chunk, vector in prepared:
+                content_hash = _content_hash(chunk.text)
+                reusable = active_by_hash.get(content_hash, [])
+                if reusable:
+                    row = reusable.pop(0)
+                    reused_ids.append(row["id"])
+                    continue
+                citation = self._citation(path, version, chunk.start_line, chunk.end_line, chunk.page)
+                cursor = self.connection.execute(
+                    """
+                    INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page,
+                                       revision_id,document_version,content_hash,valid_from,valid_to)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+                    """,
+                    (
+                        chunk.document_path,
+                        chunk.title,
+                        chunk.text,
+                        chunk.ordinal,
+                        citation,
+                        json.dumps(vector),
+                        json.dumps(chunk.tags),
+                        chunk.start_line,
+                        chunk.end_line,
+                        chunk.page,
+                        revision_id,
+                        version,
+                        content_hash,
+                        now,
+                    )
+                )
+                chunk_id = int(cursor.lastrowid)
+                inserted.append((chunk_id, vector, self._vector_metadata(path, chunk, citation, now, None, content_hash)))
+            for remaining in active_by_hash.values():
+                for row in remaining:
+                    self.connection.execute("UPDATE chunks SET valid_to = ? WHERE id = ?", (now, row["id"]))
+                    closed.append(
+                        (
+                            row["id"],
+                            json.loads(row["vector"]),
+                            self._vector_metadata_from_row(row, valid_to=now),
+                        )
+                    )
+        active_ids = [
+            row["id"]
+            for row in self.connection.execute(
+                "SELECT id FROM chunks WHERE document_path = ? AND valid_to IS NULL ORDER BY ordinal, id",
+                (path,),
+            )
+        ]
+        return {
+            "revision_id": revision_id,
+            "version": version,
+            "created_at": now,
+            "chunk_ids": active_ids,
+            "inserted": inserted,
+            "closed": closed,
+            "reused": reused_ids,
+        }
 
-    def remove_document(self, path: str) -> None:
+    def remove_document(self, path: str) -> dict:
+        now = _utc_now()
+        version = self._next_version(path)
+        row = self.connection.execute("SELECT * FROM documents WHERE path = ?", (path,)).fetchone()
+        if not row or row["deleted_at"]:
+            return {"closed": [], "version": version, "created_at": now}
+        closed: list[tuple[int, list[float], dict]] = []
         with self.connection:
-            self.connection.execute("DELETE FROM chunks WHERE document_path = ?", (path,))
-            self.connection.execute("DELETE FROM documents WHERE path = ?", (path,))
+            cursor = self.connection.execute(
+                """
+                INSERT INTO document_revisions(document_path, version, digest, content, created_at, tombstone, metadata)
+                VALUES (?, ?, ?, '', ?, 1, ?)
+                """,
+                (path, version, row["digest"], now, json.dumps({"deleted": True})),
+            )
+            revision_id = int(cursor.lastrowid)
+            active = self.connection.execute(
+                "SELECT * FROM chunks WHERE document_path = ? AND valid_to IS NULL",
+                (path,),
+            ).fetchall()
+            self.connection.execute("UPDATE chunks SET valid_to = ? WHERE document_path = ? AND valid_to IS NULL", (now, path))
+            self.connection.execute("UPDATE documents SET deleted_at = ?, indexed_at = CURRENT_TIMESTAMP WHERE path = ?", (now, path))
+            for chunk in active:
+                closed.append((chunk["id"], json.loads(chunk["vector"]), self._vector_metadata_from_row(chunk, valid_to=now)))
+        return {"revision_id": revision_id, "version": version, "created_at": now, "closed": closed}
 
     def document_paths_below(self, folder: str) -> list[str]:
         prefix = str(Path(folder).resolve())
-        return [row["path"] for row in self.connection.execute("SELECT path FROM documents WHERE path LIKE ?", (f"{prefix}%",))]
+        return [row["path"] for row in self.connection.execute("SELECT path FROM documents WHERE path LIKE ? AND deleted_at IS NULL", (f"{prefix}%",))]
 
-    def hybrid_search(self, query: str, query_vector: list[float], limit: int = 8, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[SearchHit]:
-        rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type)
+    def hybrid_search(self, query: str, query_vector: list[float], limit: int = 8, tag: str | None = None, folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> list[SearchHit]:
+        rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type, as_of=as_of)
         vector_scores = {row["id"]: _cosine(query_vector, json.loads(row["vector"])) for row in rows}
         keyword_scores: dict[int, float] = {}
         terms = [term.replace('"', "") for term in query.split() if term.strip()]
@@ -211,12 +345,15 @@ class KnowledgeStore:
             for row in ranked[:limit]
         ]
 
-    def keyword_search(self, query: str, limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[int]:
+    def keyword_search(self, query: str, limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> list[int]:
         terms = [term.replace('"', "") for term in re.findall(r"[a-z0-9_]+", query.lower()) if term.strip()]
         if not terms:
             return []
         expression = " OR ".join(f'"{term}"' for term in terms)
         filters, params = self._filter_sql(tag=tag, folder=folder, file_type=file_type, alias="d")
+        time_filter, time_params = self._time_filter_sql(as_of, alias="c")
+        filters.append(time_filter)
+        params.extend(time_params)
         where = f"AND {' AND '.join(filters)}" if filters else ""
         rows = self.connection.execute(
             f"""
@@ -232,20 +369,22 @@ class KnowledgeStore:
         ).fetchall()
         return [row["id"] for row in rows]
 
-    def vector_search(self, query_vector: list[float], limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[tuple[int, float]]:
-        rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type)
+    def vector_search(self, query_vector: list[float], limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> list[tuple[int, float]]:
+        rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type, as_of=as_of)
         scored = [
             (row["id"], _cosine(query_vector, json.loads(row["vector"])))
             for row in rows
         ]
         return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
 
-    def chunks_for_document(self, name: str) -> list[sqlite3.Row]:
+    def chunks_for_document(self, name: str, as_of: str | None = None) -> list[sqlite3.Row]:
+        time_filter, params = self._time_filter_sql(as_of)
         return self.connection.execute(
-            "SELECT * FROM chunks WHERE document_path LIKE ? OR title = ?", (f"%{name}%", name)
+            f"SELECT * FROM chunks WHERE ({time_filter}) AND (document_path LIKE ? OR title = ?)",
+            [*params, f"%{name}%", name],
         ).fetchall()
 
-    def list_documents(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[dict]:
+    def list_documents(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> list[dict]:
         filters = []
         params: list[object] = []
         if tag:
@@ -257,6 +396,11 @@ class KnowledgeStore:
         if file_type:
             filters.append("d.file_type = ?")
             params.append(file_type)
+        if as_of is None:
+            filters.append("d.deleted_at IS NULL")
+        else:
+            filters.append("EXISTS (SELECT 1 FROM chunks c2 WHERE c2.document_path = d.path AND c2.valid_from <= ? AND (c2.valid_to IS NULL OR c2.valid_to > ?))")
+            params.extend([as_of, as_of])
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         rows = self.connection.execute(
             f"""
@@ -290,10 +434,10 @@ class KnowledgeStore:
         ]
 
     def stats(self) -> dict[str, int]:
-        documents = self.connection.execute("SELECT COUNT(*) count FROM documents").fetchone()["count"]
-        chunks = self.connection.execute("SELECT COUNT(*) count FROM chunks").fetchone()["count"]
+        documents = self.connection.execute("SELECT COUNT(*) count FROM documents WHERE deleted_at IS NULL").fetchone()["count"]
+        chunks = self.connection.execute("SELECT COUNT(*) count FROM chunks WHERE valid_to IS NULL").fetchone()["count"]
         characters = self.connection.execute(
-            "SELECT COALESCE(SUM(LENGTH(text)), 0) count FROM chunks"
+            "SELECT COALESCE(SUM(LENGTH(text)), 0) count FROM chunks WHERE valid_to IS NULL"
         ).fetchone()["count"]
         tags = self.connection.execute(
             "SELECT COALESCE(SUM(json_array_length(tags)), 0) count FROM documents"
@@ -333,16 +477,23 @@ class KnowledgeStore:
             start_line=row["start_line"],
             end_line=row["end_line"],
             tags=tuple(json.loads(row["tags"] or "[]")),
+            document_path=row["document_path"],
+            revision_id=row["revision_id"],
+            document_version=row["document_version"],
+            valid_from=row["valid_from"] or "",
+            valid_to=row["valid_to"],
+            content_hash=row["content_hash"] or "",
         )
 
-    def hits_by_ids(self, ids: list[int], scores: dict[int, float]) -> list[SearchHit]:
+    def hits_by_ids(self, ids: list[int], scores: dict[int, float], as_of: str | None = None) -> list[SearchHit]:
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
-        rows = self.connection.execute(f"SELECT * FROM chunks WHERE id IN ({placeholders})", ids).fetchall()
+        time_filter, time_params = self._time_filter_sql(as_of)
+        rows = self.connection.execute(f"SELECT * FROM chunks WHERE id IN ({placeholders}) AND {time_filter}", [*ids, *time_params]).fetchall()
         by_id = {row["id"]: row for row in rows}
         return [
-            SearchHit(item_id, by_id[item_id]["text"], by_id[item_id]["title"], by_id[item_id]["citation"], scores[item_id], tuple(json.loads(by_id[item_id]["tags"] or "[]")))
+            self._hit_from_row(by_id[item_id], scores[item_id])
             for item_id in ids if item_id in by_id
         ]
 
@@ -353,35 +504,31 @@ class KnowledgeStore:
         rows = self.connection.execute(f"SELECT id, vector FROM chunks WHERE id IN ({placeholders})", ids).fetchall()
         return {row["id"]: json.loads(row["vector"]) for row in rows}
 
-    def all_chunk_previews(self, exclude_path: str | None = None) -> list[ChunkPreview]:
-        rows = self.connection.execute("SELECT * FROM chunks WHERE document_path != ? ORDER BY id" if exclude_path else "SELECT * FROM chunks ORDER BY id", (exclude_path,) if exclude_path else ()).fetchall()
+    def all_chunk_previews(self, exclude_path: str | None = None, as_of: str | None = None) -> list[ChunkPreview]:
+        time_filter, params = self._time_filter_sql(as_of)
+        if exclude_path:
+            rows = self.connection.execute(
+                f"SELECT * FROM chunks WHERE document_path != ? AND {time_filter} ORDER BY id",
+                [exclude_path, *params],
+            ).fetchall()
+        else:
+            rows = self.connection.execute(f"SELECT * FROM chunks WHERE {time_filter} ORDER BY id", params).fetchall()
         return [
-            ChunkPreview(row["id"], row["title"], row["text"], row["citation"], row["page"], row["start_line"], row["end_line"], tuple(json.loads(row["tags"] or "[]")))
+            self._preview_from_row(row)
             for row in rows
         ]
 
-    def document_chunks(self, path: str) -> list[ChunkPreview]:
+    def document_chunks(self, path: str, as_of: str | None = None) -> list[ChunkPreview]:
+        time_filter, params = self._time_filter_sql(as_of)
         rows = self.connection.execute(
-            "SELECT * FROM chunks WHERE document_path = ? ORDER BY ordinal",
-            (path,),
+            f"SELECT * FROM chunks WHERE document_path = ? AND {time_filter} ORDER BY ordinal, id",
+            [path, *params],
         ).fetchall()
-        return [
-            ChunkPreview(
-                chunk_id=row["id"],
-                title=row["title"],
-                text=row["text"],
-                citation=row["citation"],
-                page=row["page"],
-                start_line=row["start_line"],
-                end_line=row["end_line"],
-                tags=tuple(json.loads(row["tags"] or "[]")),
-            )
-            for row in rows
-        ]
+        return [self._preview_from_row(row) for row in rows]
 
     def graph_edges(self, limit: int = 24) -> list[GraphEdge]:
         documents = self.list_documents()
-        chunk_rows = self.connection.execute("SELECT document_path, vector FROM chunks").fetchall()
+        chunk_rows = self.connection.execute("SELECT document_path, vector FROM chunks WHERE valid_to IS NULL").fetchall()
         by_document: dict[str, list[list[float]]] = defaultdict(list)
         for row in chunk_rows:
             by_document[row["document_path"]].append(json.loads(row["vector"]))
@@ -564,6 +711,7 @@ class KnowledgeStore:
     def backup_payload(self) -> dict:
         return {
             "documents": self.list_documents(),
+            "document_revisions": [dict(row) for row in self.connection.execute("SELECT * FROM document_revisions ORDER BY document_path, version")],
             "saved_searches": [search.__dict__ for search in self.list_saved_searches()],
             "conversation_history": self.conversation_history(100),
             "watch_folders": [watch.__dict__ for watch in self.list_watch_folders()],
@@ -576,22 +724,32 @@ class KnowledgeStore:
 
     def restore_payload(self, payload: dict) -> dict[str, int]:
         documents = payload.get("documents") or []
+        revisions = payload.get("document_revisions") or []
         chunks = payload.get("chunks") or []
         if not isinstance(documents, list) or not isinstance(chunks, list):
             raise ValueError("Backup must contain document and chunk lists.")
         with self.connection:
             for document in documents:
                 self.connection.execute(
-                    """INSERT INTO documents(path,digest,title,source_type,file_type,folder,tags,links,indexed_at)
-                       VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP))
-                       ON CONFLICT(path) DO UPDATE SET digest=excluded.digest,title=excluded.title,source_type=excluded.source_type,file_type=excluded.file_type,folder=excluded.folder,tags=excluded.tags,links=excluded.links,indexed_at=excluded.indexed_at""",
-                    (document["path"], document.get("digest", "restored"), document.get("title", ""), document.get("source_type", "file"), document.get("file_type", "txt"), document.get("folder", "root"), json.dumps(document.get("tags", [])), json.dumps(document.get("links", [])), document.get("indexed_at")),
+                    """INSERT INTO documents(path,digest,title,source_type,file_type,folder,tags,links,indexed_at,document_id,deleted_at)
+                       VALUES(?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?,?)
+                       ON CONFLICT(path) DO UPDATE SET digest=excluded.digest,title=excluded.title,source_type=excluded.source_type,file_type=excluded.file_type,folder=excluded.folder,tags=excluded.tags,links=excluded.links,indexed_at=excluded.indexed_at,document_id=excluded.document_id,deleted_at=excluded.deleted_at""",
+                    (document["path"], document.get("digest", "restored"), document.get("title", ""), document.get("source_type", "file"), document.get("file_type", "txt"), document.get("folder", "root"), json.dumps(document.get("tags", [])), json.dumps(document.get("links", [])), document.get("indexed_at"), document.get("document_id") or self._document_id(document["path"]), document.get("deleted_at")),
                 )
                 self.connection.execute("DELETE FROM chunks WHERE document_path = ?", (document["path"],))
+                self.connection.execute("DELETE FROM document_revisions WHERE document_path = ?", (document["path"],))
+            for revision in revisions:
+                self.connection.execute(
+                    """INSERT INTO document_revisions(id,document_path,version,digest,content,created_at,tombstone,metadata)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (revision.get("id"), revision["document_path"], revision["version"], revision.get("digest", "restored"), revision.get("content", ""), revision.get("created_at") or _utc_now(), int(bool(revision.get("tombstone"))), revision.get("metadata", "{}")),
+                )
             for chunk in chunks:
                 self.connection.execute(
-                    "INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (chunk["document_path"], chunk["title"], chunk["text"], chunk["ordinal"], chunk["citation"], chunk["vector"], chunk.get("tags", "[]"), chunk.get("start_line"), chunk.get("end_line"), chunk.get("page")),
+                    """INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page,
+                                          revision_id,document_version,content_hash,valid_from,valid_to)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (chunk["document_path"], chunk["title"], chunk["text"], chunk["ordinal"], chunk["citation"], chunk["vector"], chunk.get("tags", "[]"), chunk.get("start_line"), chunk.get("end_line"), chunk.get("page"), chunk.get("revision_id"), chunk.get("document_version", 1), chunk.get("content_hash") or _content_hash(chunk["text"]), chunk.get("valid_from") or _utc_now(), chunk.get("valid_to")),
                 )
         return {"documents": len(documents), "chunks": len(chunks)}
 
@@ -616,6 +774,40 @@ class KnowledgeStore:
         ).fetchall()
         return [self._diagnostic_from_row(row) for row in rows]
 
+    def revision_history(self, path: str) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT * FROM document_revisions WHERE document_path = ? ORDER BY version DESC",
+            (path,),
+        ).fetchall()
+        return [dict(row) | {"metadata": json.loads(row["metadata"] or "{}")} for row in rows]
+
+    def revision_content(self, path: str, version: int) -> str | None:
+        row = self.connection.execute(
+            "SELECT content FROM document_revisions WHERE document_path = ? AND version = ?",
+            (path, version),
+        ).fetchone()
+        return row["content"] if row else None
+
+    def revision_diff(self, path: str, left: int, right: int) -> dict:
+        left_text = self.revision_content(path, left)
+        right_text = self.revision_content(path, right)
+        if left_text is None or right_text is None:
+            raise ValueError("Both revisions must exist.")
+        diff = "\n".join(
+            unified_diff(
+                left_text.splitlines(),
+                right_text.splitlines(),
+                fromfile=f"v{left}",
+                tofile=f"v{right}",
+                lineterm="",
+            )
+        )
+        return {"path": path, "left": left, "right": right, "diff": diff}
+
+    def citation_preview(self, citation: str) -> ChunkPreview | None:
+        row = self.connection.execute("SELECT * FROM chunks WHERE citation = ?", (citation,)).fetchone()
+        return self._preview_from_row(row) if row else None
+
     @staticmethod
     def _diagnostic_from_row(row: sqlite3.Row) -> ParseDiagnostic:
         return ParseDiagnostic(
@@ -626,8 +818,11 @@ class KnowledgeStore:
             created_at=row["created_at"],
         )
 
-    def _chunk_rows(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[sqlite3.Row]:
+    def _chunk_rows(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> list[sqlite3.Row]:
         filters, params = self._filter_sql(tag=tag, folder=folder, file_type=file_type)
+        time_filter, time_params = self._time_filter_sql(as_of, alias="c")
+        filters.append(time_filter)
+        params.extend(time_params)
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         return self.connection.execute(
             f"""
@@ -639,12 +834,157 @@ class KnowledgeStore:
             params,
         ).fetchall()
 
+    def _next_version(self, path: str) -> int:
+        row = self.connection.execute("SELECT COALESCE(MAX(version), 0) value FROM document_revisions WHERE document_path = ?", (path,)).fetchone()
+        return int(row["value"] or 0) + 1
+
+    def _document_id(self, path: str) -> str:
+        row = self.connection.execute("SELECT document_id FROM documents WHERE path = ?", (path,)).fetchone()
+        if row and row["document_id"]:
+            return row["document_id"]
+        return sha256(path.encode()).hexdigest()[:16]
+
+    def _citation(self, path: str, version: int, start_line: int | None, end_line: int | None, page: int | None) -> str:
+        if page is not None:
+            return f"{path}?rev={version}#page={page}"
+        if start_line is not None:
+            return f"{path}?rev={version}#L{start_line}-L{end_line}"
+        return f"{path}?rev={version}"
+
+    def _vector_metadata(self, path: str, chunk: Chunk, citation: str, valid_from: str, valid_to: str | None, content_hash: str) -> dict:
+        return {
+            "document_path": path,
+            "title": chunk.title,
+            "citation": citation,
+            "folder": Path(path).parent.name,
+            "file_type": Path(path).suffix.lower().lstrip(".") or "txt",
+            "tags": ",".join(chunk.tags),
+            "valid_from": valid_from,
+            "valid_to": valid_to or "__open__",
+            "valid_to_sort": valid_to or "9999-12-31T23:59:59.999999Z",
+            "content_hash": content_hash,
+        }
+
+    def _vector_metadata_from_row(self, row: sqlite3.Row, valid_to: str | None = None) -> dict:
+        return {
+            "document_path": row["document_path"],
+            "title": row["title"],
+            "citation": row["citation"],
+            "folder": Path(row["document_path"]).parent.name,
+            "file_type": Path(row["document_path"]).suffix.lower().lstrip(".") or "txt",
+            "tags": ",".join(json.loads(row["tags"] or "[]")),
+            "valid_from": row["valid_from"],
+            "valid_to": valid_to or row["valid_to"] or "__open__",
+            "valid_to_sort": valid_to or row["valid_to"] or "9999-12-31T23:59:59.999999Z",
+            "content_hash": row["content_hash"],
+        }
+
+    def _hit_from_row(self, row: sqlite3.Row, score: float) -> SearchHit:
+        return SearchHit(
+            row["id"],
+            row["text"],
+            row["title"],
+            row["citation"],
+            score,
+            tuple(json.loads(row["tags"] or "[]")),
+            document_path=row["document_path"],
+            revision_id=row["revision_id"],
+            document_version=row["document_version"],
+            valid_from=row["valid_from"] or "",
+            valid_to=row["valid_to"],
+            content_hash=row["content_hash"] or "",
+        )
+
+    def _preview_from_row(self, row: sqlite3.Row) -> ChunkPreview:
+        return ChunkPreview(
+            chunk_id=row["id"],
+            title=row["title"],
+            text=row["text"],
+            citation=row["citation"],
+            page=row["page"],
+            start_line=row["start_line"],
+            end_line=row["end_line"],
+            tags=tuple(json.loads(row["tags"] or "[]")),
+            document_path=row["document_path"],
+            revision_id=row["revision_id"],
+            document_version=row["document_version"],
+            valid_from=row["valid_from"] or "",
+            valid_to=row["valid_to"],
+            content_hash=row["content_hash"] or "",
+        )
+
+    @staticmethod
+    def _time_filter_sql(as_of: str | None, alias: str = "") -> tuple[str, list[object]]:
+        prefix = f"{alias}." if alias else ""
+        if as_of is None:
+            return f"{prefix}valid_to IS NULL", []
+        return f"{prefix}valid_from <= ? AND ({prefix}valid_to IS NULL OR {prefix}valid_to > ?)", [as_of, as_of]
+
+    def _backfill_revisions(self) -> None:
+        now = _utc_now()
+        documents = self.connection.execute("SELECT * FROM documents").fetchall()
+        with self.connection:
+            for document in documents:
+                path = document["path"]
+                document_id = document["document_id"] or self._document_id(path)
+                self.connection.execute("UPDATE documents SET document_id = ? WHERE path = ?", (document_id, path))
+                existing = self.connection.execute(
+                    "SELECT id, created_at FROM document_revisions WHERE document_path = ? AND version = 1",
+                    (path,),
+                ).fetchone()
+                chunks = self.connection.execute("SELECT * FROM chunks WHERE document_path = ? ORDER BY ordinal, id", (path,)).fetchall()
+                content = "\n\n".join(row["text"] for row in chunks)
+                if existing:
+                    revision_id = existing["id"]
+                    created_at = existing["created_at"]
+                else:
+                    cursor = self.connection.execute(
+                        """
+                        INSERT INTO document_revisions(document_path, version, digest, content, created_at, tombstone, metadata)
+                        VALUES (?, 1, ?, ?, ?, 0, ?)
+                        """,
+                        (
+                            path,
+                            document["digest"],
+                            content,
+                            document["indexed_at"] or now,
+                            json.dumps({
+                                "title": document["title"],
+                                "source_type": document["source_type"],
+                                "file_type": document["file_type"],
+                                "folder": document["folder"],
+                                "tags": json.loads(document["tags"] or "[]"),
+                                "links": json.loads(document["links"] or "[]"),
+                                "backfilled": True,
+                            }),
+                        ),
+                    )
+                    revision_id = int(cursor.lastrowid)
+                    created_at = document["indexed_at"] or now
+                for row in chunks:
+                    content_hash = row["content_hash"] or _content_hash(row["text"])
+                    citation = row["citation"]
+                    if "?rev=" not in citation:
+                        citation = self._citation(path, 1, row["start_line"], row["end_line"], row["page"])
+                    self.connection.execute(
+                        """
+                        UPDATE chunks
+                        SET revision_id = COALESCE(revision_id, ?),
+                            document_version = COALESCE(document_version, 1),
+                            content_hash = ?,
+                            valid_from = COALESCE(valid_from, ?),
+                            citation = ?
+                        WHERE id = ?
+                        """,
+                        (revision_id, content_hash, created_at, citation, row["id"]),
+                    )
+
     @staticmethod
     def _filter_sql(tag: str | None = None, folder: str | None = None, file_type: str | None = None, alias: str = "d") -> tuple[list[str], list[object]]:
         filters = []
         params: list[object] = []
         if tag:
-            filters.append("c.tags LIKE ?")
+            filters.append(f"{alias}.tags LIKE ?")
             params.append(f'%"{tag.lower()}"%')
         if folder:
             filters.append(f"{alias}.folder = ?")
@@ -674,3 +1014,11 @@ def _average(vectors: list[list[float]]) -> list[float]:
         return []
     dims = len(vectors[0])
     return [sum(vector[index] for vector in vectors) / len(vectors) for index in range(dims)]
+
+
+def _content_hash(text: str) -> str:
+    return sha256(text.encode()).hexdigest()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

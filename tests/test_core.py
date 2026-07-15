@@ -2,6 +2,7 @@ import json
 import asyncio
 import importlib
 import re
+import time
 from pathlib import Path
 from urllib.request import Request
 from zipfile import ZipFile
@@ -14,6 +15,21 @@ from mnemosyne.ingest import chunk_document, parse
 from mnemosyne.models import SearchHit, SourceDocument
 from mnemosyne.providers import OllamaEmbedder, OllamaGenerator
 from mnemosyne.service import KnowledgeBase
+
+
+class CountingEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.last_backend = "test"
+        self.last_error = None
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        vectors = []
+        for text in texts:
+            seed = sum(ord(char) for char in text)
+            vectors.append([float(seed % 997), float(len(text) % 251), 1.0])
+        return vectors
 
 
 def test_chunks_keep_line_citations():
@@ -33,6 +49,67 @@ def test_ingest_and_search(tmp_path: Path):
     hits = kb.search("semantic keyword retrieval")
     assert hits
     assert "retrieval.md" in hits[0].citation
+
+
+def test_time_travel_search_delete_citation_and_rollback(tmp_path: Path):
+    note = tmp_path / "memory.md"
+    note.write_text("alpha old project plan\nshared stable line")
+    kb = KnowledgeBase(Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", embed_provider="hash"))
+
+    assert kb.ingest(note) == (1, 0)
+    v1 = kb.revision_history(str(note.resolve()))[0]
+    old_hit = kb.search("alpha old plan")[0]
+    old_citation = old_hit.citation
+
+    time.sleep(0.01)
+    note.write_text("beta new project plan\nshared stable line")
+    assert kb.ingest(note) == (1, 0)
+    latest = kb.search("alpha old plan")
+    historical = kb.search("alpha old plan", as_of=v1["created_at"])
+
+    assert not any("alpha old" in hit.text for hit in latest)
+    assert historical and "alpha old" in historical[0].text
+
+    resolved = kb.store.citation_preview(old_citation)
+    assert resolved is not None
+    assert "alpha old project plan" in resolved.text
+    assert resolved.document_version == 1
+
+    time.sleep(0.01)
+    removal = kb.store.remove_document(str(note.resolve()))
+    assert removal["closed"]
+    assert not kb.search("beta new project")
+    assert kb.search("beta new project", as_of=kb.revision_history(str(note.resolve()))[1]["created_at"])
+
+    assert kb.restore_revision(str(note.resolve()), 1) == (1, 0)
+    versions = [revision["version"] for revision in kb.revision_history(str(note.resolve()))]
+    assert versions[0] == 4
+    assert kb.search("alpha old project")
+    assert "beta new" in kb.revision_diff(str(note.resolve()), 2, 4)["diff"]
+
+
+def test_incremental_reindex_reuses_unchanged_chunk_vectors(tmp_path: Path):
+    note = tmp_path / "chunks.md"
+    note.write_text("first block alpha stays\n\nsecond block beta changes")
+    embedder = CountingEmbedder()
+    kb = KnowledgeBase(
+        Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db", embed_provider="hash", chunk_size=24, chunk_overlap=0),
+        embedder=embedder,
+    )
+    kb.ingest(note)
+    first_vectors = sum(len(call) for call in embedder.calls)
+    assert first_vectors == 2
+
+    time.sleep(0.01)
+    note.write_text("first block alpha stays\n\nsecond block gamma changed")
+    kb.ingest(note)
+
+    total_vectors = sum(len(call) for call in embedder.calls)
+    assert total_vectors == 3
+    active = kb.store.document_chunks(str(note.resolve()))
+    assert len(active) == 2
+    assert any("first block alpha stays" in chunk.text and chunk.document_version == 1 for chunk in active)
+    assert any("second block gamma changed" in chunk.text and chunk.document_version == 2 for chunk in active)
 
 
 def test_library_stats_and_document_listing(tmp_path: Path):

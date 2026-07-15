@@ -44,6 +44,12 @@ class SearchHit:
     citation: str
     score: float
     tags: tuple[str, ...] = ()
+    document_path: str = ""
+    revision_id: int | None = None
+    document_version: int = 1
+    valid_from: str = ""
+    valid_to: str | None = None
+    content_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,12 @@ class ChunkPreview:
     start_line: int | None
     end_line: int | None
     tags: tuple[str, ...] = ()
+    document_path: str = ""
+    revision_id: int | None = None
+    document_version: int = 1
+    valid_from: str = ""
+    valid_to: str | None = None
+    content_hash: str = ""
 
 
 @dataclass(frozen=True)

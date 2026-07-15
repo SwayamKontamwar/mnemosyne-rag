@@ -6,6 +6,7 @@ import re
 import threading
 from collections import defaultdict
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -78,12 +79,27 @@ class KnowledgeBase:
                     "The parser found a document but no searchable chunks were produced.",
                 )
                 continue
-            vectors = self.embedder.embed([chunk.text for chunk in chunks])
+            reusable_vectors = self.store.active_vectors_by_hash(absolute)
+            vectors: list[list[float] | None] = []
+            to_embed: list[tuple[int, str]] = []
+            for index, chunk in enumerate(chunks):
+                content_hash = self._content_hash(chunk.text)
+                cached = reusable_vectors.get(content_hash, [])
+                if cached:
+                    vectors.append(cached.pop(0))
+                else:
+                    vectors.append(None)
+                    to_embed.append((index, chunk.text))
+            if to_embed:
+                embedded = self.embedder.embed([text for _, text in to_embed])
+                for (index, _), vector in zip(to_embed, embedded):
+                    vectors[index] = vector
+            prepared_vectors = [vector for vector in vectors if vector is not None]
             primary = documents[0]
-            chunk_ids = self.store.replace_document(
+            revision = self.store.replace_document(
                 absolute,
                 digest,
-                zip(chunks, vectors),
+                zip(chunks, prepared_vectors),
                 {
                     "title": primary.title,
                     "source_type": primary.source_type,
@@ -91,25 +107,17 @@ class KnowledgeBase:
                     "folder": primary.folder,
                     "tags": list(primary.tags),
                     "links": list(primary.links),
+                    "content": "\n\n".join(document.text for document in documents),
                 },
             )
             if self.vector_store:
-                self.vector_store.delete_document(absolute)
-                self.vector_store.add(
-                    [str(item_id) for item_id in chunk_ids],
-                    vectors,
-                    [
-                        {
-                            "document_path": absolute,
-                            "title": chunk.title,
-                            "citation": chunk.citation,
-                            "folder": primary.folder,
-                            "file_type": primary.file_type,
-                            "tags": ",".join(chunk.tags),
-                        }
-                        for chunk in chunks
-                    ],
-                )
+                for key in ("inserted", "closed"):
+                    rows = revision.get(key, [])
+                    self.vector_store.add(
+                        [str(item_id) for item_id, _, _ in rows],
+                        [vector for _, vector, _ in rows],
+                        [metadata for _, _, metadata in rows],
+                    )
             indexed += 1
         return indexed, skipped
 
@@ -121,6 +129,7 @@ class KnowledgeBase:
         folder: str | None = None,
         file_type: str | None = None,
         generator: Generator | None = None,
+        as_of: str | None = None,
     ) -> list[SearchHit]:
         generator = generator or self._retrieval_generator()
         plan = self._query_plan(query, generator)
@@ -133,12 +142,12 @@ class KnowledgeBase:
         weighted_rankings: list[tuple[list[int], float]] = []
 
         for expanded_query in [query, *plan["expanded_queries"]]:
-            ids = self.store.keyword_search(expanded_query, candidate_limit, tag=tag, folder=folder, file_type=file_type)
+            ids = self.store.keyword_search(expanded_query, candidate_limit, tag=tag, folder=folder, file_type=file_type, as_of=as_of)
             if ids:
                 weighted_rankings.append((ids, 1.1 if expanded_query == query else 0.8))
 
         for index, vector in enumerate(query_vectors):
-            vector_hits = self._vector_candidates(vector, candidate_limit, tag=tag, folder=folder, file_type=file_type)
+            vector_hits = self._vector_candidates(vector, candidate_limit, tag=tag, folder=folder, file_type=file_type, as_of=as_of)
             ids = [chunk_id for chunk_id, _ in vector_hits]
             if ids:
                 weighted_rankings.append((ids, 1.0 if index == 0 else 0.85))
@@ -147,7 +156,7 @@ class KnowledgeBase:
         if not fused_scores:
             return []
         fused_ids = sorted(fused_scores, key=fused_scores.get, reverse=True)[:rerank_limit]
-        candidates = self.store.hits_by_ids(fused_ids, fused_scores)
+        candidates = self.store.hits_by_ids(fused_ids, fused_scores, as_of=as_of)
         reranked = self._rerank(query, candidates, generator=generator)
         diverse = self._mmr(query_vectors[0], reranked, limit)
         return diverse[:limit]
@@ -159,8 +168,9 @@ class KnowledgeBase:
         tag: str | None = None,
         folder: str | None = None,
         file_type: str | None = None,
+        as_of: str | None = None,
     ) -> tuple[str, list[SearchHit], CitationValidation]:
-        hits = self.search(query, tag=tag, folder=folder, file_type=file_type, generator=generator)
+        hits = self.search(query, tag=tag, folder=folder, file_type=file_type, generator=generator, as_of=as_of)
         context = "\n\n".join(f"[{i}] {hit.citation}\n{hit.text}" for i, hit in enumerate(hits, 1))
         prompt = f"""You answer questions using only the supplied personal notes.
 If the notes do not support an answer, say so. Cite claims with bracketed source numbers
@@ -189,7 +199,7 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
             {
                 "citations": list(validation.cited_numbers),
                 "verdict": validation.verdict,
-                "filters": {"tag": tag, "folder": folder, "file_type": file_type},
+                "filters": {"tag": tag, "folder": folder, "file_type": file_type, "as_of": as_of},
             },
         )
         self.store.log_evaluation(
@@ -258,9 +268,14 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
                 removed = 0
                 for stored_path in self.store.document_paths_below(str(path)):
                     if stored_path not in present:
-                        self.store.remove_document(stored_path)
+                        removal = self.store.remove_document(stored_path)
                         if self.vector_store:
-                            self.vector_store.delete_document(stored_path)
+                            rows = removal.get("closed", [])
+                            self.vector_store.add(
+                                [str(item_id) for item_id, _, _ in rows],
+                                [vector for _, vector, _ in rows],
+                                [metadata for _, _, metadata in rows],
+                            )
                         removed += 1
                 results.append({"path": watch.path, "indexed": indexed, "skipped": skipped, "removed": removed, "profile": watch.profile})
         return {"scanned": results}
@@ -294,6 +309,21 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
             "timeline": self.timeline(path),
             "contradictions": self.contradictions(path),
         }
+
+    def revision_history(self, path: str) -> list[dict]:
+        return self.store.revision_history(path)
+
+    def revision_diff(self, path: str, left: int, right: int) -> dict:
+        return self.store.revision_diff(path, left, right)
+
+    def restore_revision(self, path: str, version: int) -> tuple[int, int]:
+        content = self.store.revision_content(path, version)
+        if content is None:
+            raise ValueError("Revision does not exist.")
+        source = Path(path)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(content)
+        return self.ingest(source)
 
     def related_notes(self, path: str, limit: int = 6) -> list[dict]:
         edges = self.graph(64)
@@ -466,22 +496,27 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
         tag: str | None = None,
         folder: str | None = None,
         file_type: str | None = None,
+        as_of: str | None = None,
     ) -> list[tuple[int, float]]:
         if self.vector_store and not tag:
-            where = self._chroma_where(folder=folder, file_type=file_type)
+            where = self._chroma_where(folder=folder, file_type=file_type, as_of=as_of)
             try:
                 return self.vector_store.query(query_vector, limit, where=where)
             except Exception:
                 pass
-        return self.store.vector_search(query_vector, limit, tag=tag, folder=folder, file_type=file_type)
+        return self.store.vector_search(query_vector, limit, tag=tag, folder=folder, file_type=file_type, as_of=as_of)
 
     @staticmethod
-    def _chroma_where(folder: str | None = None, file_type: str | None = None) -> dict | None:
+    def _chroma_where(folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> dict | None:
         clauses = []
         if folder:
             clauses.append({"folder": folder})
         if file_type:
             clauses.append({"file_type": file_type})
+        if as_of is None:
+            clauses.append({"valid_to": "__open__"})
+        else:
+            clauses.extend([{"valid_from": {"$lte": as_of}}, {"valid_to_sort": {"$gt": as_of}}])
         if not clauses:
             return None
         if len(clauses) == 1:
@@ -582,6 +617,10 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
     def _cosine(left: list[float], right: list[float]) -> float:
         denominator = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(x * x for x in right))
         return sum(a * b for a, b in zip(left, right)) / denominator if denominator else 0.0
+
+    @staticmethod
+    def _content_hash(text: str) -> str:
+        return sha256(text.encode()).hexdigest()
 
     def _validate_citations(self, answer: str, hits: list[SearchHit]) -> CitationValidation:
         cited_numbers = tuple(sorted({int(match) for match in REFERENCE_PATTERN.findall(answer)}))

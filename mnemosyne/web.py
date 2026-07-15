@@ -57,6 +57,7 @@ class SearchRequest(BaseModel):
     tag: str | None = None
     folder: str | None = None
     file_type: str | None = None
+    as_of: str | None = None
 
 
 class AskRequest(BaseModel):
@@ -64,6 +65,7 @@ class AskRequest(BaseModel):
     tag: str | None = None
     folder: str | None = None
     file_type: str | None = None
+    as_of: str | None = None
 
 
 class SavedSearchRequest(BaseModel):
@@ -93,6 +95,11 @@ class SettingsRequest(BaseModel):
 class WatchFolderRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2000)
     profile: str = Field(default="local", max_length=40)
+
+
+class RestoreRevisionRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2000)
+    version: int = Field(ge=1)
 
 
 @app.get("/", include_in_schema=False)
@@ -208,9 +215,10 @@ def scan_watch_folders() -> dict:
 @app.post("/api/search")
 def search(request: SearchRequest) -> dict:
     knowledge.store.log_conversation("search", request.query, payload=_dump_model(request))
-    hits = knowledge.search(request.query, request.limit, tag=request.tag, folder=request.folder, file_type=request.file_type)
+    hits = knowledge.search(request.query, request.limit, tag=request.tag, folder=request.folder, file_type=request.file_type, as_of=request.as_of)
     return {
         "query": request.query,
+        "as_of": request.as_of,
         "results": [
             {
                 "id": hit.chunk_id,
@@ -219,6 +227,9 @@ def search(request: SearchRequest) -> dict:
                 "citation": hit.citation,
                 "score": round(hit.score, 4),
                 "tags": list(hit.tags),
+                "revision": hit.document_version,
+                "valid_from": hit.valid_from,
+                "valid_to": hit.valid_to,
             }
             for hit in hits
         ],
@@ -251,13 +262,14 @@ def ask(request: AskRequest) -> dict:
             tag=request.tag,
             folder=request.folder,
             file_type=request.file_type,
+            as_of=request.as_of,
         )
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
     return {
         "answer": answer,
         "sources": [
-            {"number": index, "title": hit.title, "citation": hit.citation, "text": hit.text, "chunk_id": hit.chunk_id}
+            {"number": index, "title": hit.title, "citation": hit.citation, "text": hit.text, "chunk_id": hit.chunk_id, "revision": hit.document_version}
             for index, hit in enumerate(hits, 1)
         ],
         "validation": {
@@ -284,6 +296,29 @@ def chunk_preview(chunk_id: int) -> dict:
         "start_line": preview.start_line,
         "end_line": preview.end_line,
         "tags": list(preview.tags),
+        "document_path": preview.document_path,
+        "revision": preview.document_version,
+        "valid_from": preview.valid_from,
+        "valid_to": preview.valid_to,
+    }
+
+
+@app.get("/api/citations/resolve")
+def citation_preview(citation: str) -> dict:
+    preview = knowledge.store.citation_preview(citation)
+    if not preview:
+        raise HTTPException(404, "Citation not found.")
+    return {
+        "id": preview.chunk_id,
+        "title": preview.title,
+        "text": preview.text,
+        "citation": preview.citation,
+        "page": preview.page,
+        "start_line": preview.start_line,
+        "end_line": preview.end_line,
+        "revision": preview.document_version,
+        "valid_from": preview.valid_from,
+        "valid_to": preview.valid_to,
     }
 
 
@@ -293,6 +328,28 @@ def reader(path: str) -> dict:
     if result["document"] is None:
         raise HTTPException(404, "Document not found.")
     return result
+
+
+@app.get("/api/revisions")
+def revisions(path: str) -> dict:
+    return {"path": path, "revisions": knowledge.revision_history(path)}
+
+
+@app.get("/api/revisions/diff")
+def revision_diff(path: str, left: int, right: int) -> dict:
+    try:
+        return knowledge.revision_diff(path, left, right)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/revisions/restore")
+def restore_revision(request: RestoreRevisionRequest) -> dict:
+    try:
+        indexed, skipped = knowledge.restore_revision(request.path, request.version)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"indexed": indexed, "skipped": skipped, "history": knowledge.revision_history(request.path)}
 
 
 @app.get("/api/graph")
