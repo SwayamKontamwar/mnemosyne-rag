@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  base-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install base package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Smoke normal install path
+        run: |
+          python <<'PY'
+          import tempfile
+          from pathlib import Path
+          from openpyxl import Workbook
+          from mnemosyne.config import Settings
+          from mnemosyne.ingest import parse
+          from mnemosyne.service import KnowledgeBase
+
+          root = Path(tempfile.mkdtemp(prefix="mnname: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  base-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install base package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Smoke normal install path
+        run: |
+          python <<'PY'
+          import tempfile
+          from pathlib import Path
+          from openpyxl import Workbook
+          from mnemosyne.config import Settings
+          from mnemosyne.ingest import parse
+          from mnemosyne.service import KnowledgeBase
+
+          root = Path(tempfile.mkdtemp(prefix="mnemo-ci-base-"))
+          workbook_path = root / "ci.xlsx"
+          workbook = Workbook()
+          sheet = workbook.active
+          sheet.title = "Smoke"
+          sheet.append(["term"])
+          sheet.append(["base install sentinel"])
+          workbook.save(workbook_path)
+          docs = parse(workbook_path)
+          assert docs and "base install sentinel" in docs[0].text
+
+          settings = Settings(root / "data", root / "data" / "knowledge.db")
+          kb = KnowledgeBase(settings)
+          indexed, skipped = kb.ingest(workbook_path)
+          assert (indexed, skipped) == (1, 0)
+          assert kb.search("base install sentinel")
+          print("base install smoke ok")
+          PY
+
+  dev-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Run test suite
+        run: pytest -q
+emo-ci-base-"))
+          workbook_path = root / "ci.xlsx"
+          workbook = Workbook()
+          sheet = workbook.active
+          sheet.title = "Smoke"
+          sheet.append(["term"])
+          sheet.append(["base install sentinel"])
+          workbook.save(workbook_path)
+          docs = parse(workbook_path)
+          assert docs and "base install sentinel" in docs[0].text
+
+          settings = Settings(root / "data", root / "data" / "knowledge.db")
+          kb = KnowledgeBase(settings)
+          indexed, skipped = kb.ingest(workbook_path)
+          assert (indexed, skipped) == (1, 0)
+          assert kb.search("base install sentinel")
+          print("base install smoke ok")
+          PY
+
+  dev-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Run test suite
+        run: pytest -q
