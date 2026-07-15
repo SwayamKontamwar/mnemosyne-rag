@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import math
 import re
 import threading
+from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 from zipfile import ZipFile
@@ -9,7 +12,7 @@ from zipfile import ZipFile
 from .config import Settings
 from .ingest import chunk_document, discover, file_digest, ocr_status, parse
 from .models import CitationValidation, GraphEdge, SearchHit, TopicCluster
-from .providers import ChromaVectorAdapter, Embedder, Generator, HashingEmbedder, OllamaEmbedder
+from .providers import ChromaVectorAdapter, Embedder, Generator, HashingEmbedder, OllamaEmbedder, OllamaGenerator
 from .store import KnowledgeStore
 
 REFERENCE_PATTERN = re.compile(r"\[(\d+)\]")
@@ -95,27 +98,59 @@ class KnowledgeBase:
                 self.vector_store.add(
                     [str(item_id) for item_id in chunk_ids],
                     vectors,
-                    [{"document_path": absolute, "title": chunk.title, "citation": chunk.citation} for chunk in chunks],
+                    [
+                        {
+                            "document_path": absolute,
+                            "title": chunk.title,
+                            "citation": chunk.citation,
+                            "folder": primary.folder,
+                            "file_type": primary.file_type,
+                            "tags": ",".join(chunk.tags),
+                        }
+                        for chunk in chunks
+                    ],
                 )
             indexed += 1
         return indexed, skipped
 
-    def search(self, query: str, limit: int = 8, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[SearchHit]:
-        query_vector = self.embedder.embed([query])[0]
-        dense_hits = self.store.hybrid_search(query, query_vector, max(limit * 3, 12), tag=tag, folder=folder, file_type=file_type)
-        if self.vector_store and not any((tag, folder, file_type)):
-            chroma = self.vector_store.query(query_vector, max(limit * 3, 12))
-            chroma_hits = self.store.hits_by_ids([item_id for item_id, _ in chroma], dict(chroma))
-            merged = {hit.chunk_id: hit for hit in dense_hits}
-            for hit in chroma_hits:
-                current = merged.get(hit.chunk_id)
-                if current:
-                    merged[hit.chunk_id] = SearchHit(hit.chunk_id, hit.text, hit.title, hit.citation, max(current.score, hit.score), hit.tags)
-                else:
-                    merged[hit.chunk_id] = hit
-            dense_hits = list(merged.values())
-        reranked = self._rerank(query, dense_hits)
-        return reranked[:limit]
+    def search(
+        self,
+        query: str,
+        limit: int = 8,
+        tag: str | None = None,
+        folder: str | None = None,
+        file_type: str | None = None,
+        generator: Generator | None = None,
+    ) -> list[SearchHit]:
+        generator = generator or self._retrieval_generator()
+        plan = self._query_plan(query, generator)
+        candidate_limit = max(20, limit * 6)
+        rerank_limit = max(20, limit * 3)
+        semantic_texts = [query, *plan["expanded_queries"]]
+        if plan["hyde"]:
+            semantic_texts.append(plan["hyde"])
+        query_vectors = self.embedder.embed(semantic_texts)
+        weighted_rankings: list[tuple[list[int], float]] = []
+
+        for expanded_query in [query, *plan["expanded_queries"]]:
+            ids = self.store.keyword_search(expanded_query, candidate_limit, tag=tag, folder=folder, file_type=file_type)
+            if ids:
+                weighted_rankings.append((ids, 1.1 if expanded_query == query else 0.8))
+
+        for index, vector in enumerate(query_vectors):
+            vector_hits = self._vector_candidates(vector, candidate_limit, tag=tag, folder=folder, file_type=file_type)
+            ids = [chunk_id for chunk_id, _ in vector_hits]
+            if ids:
+                weighted_rankings.append((ids, 1.0 if index == 0 else 0.85))
+
+        fused_scores = self._reciprocal_rank_fusion(weighted_rankings)
+        if not fused_scores:
+            return []
+        fused_ids = sorted(fused_scores, key=fused_scores.get, reverse=True)[:rerank_limit]
+        candidates = self.store.hits_by_ids(fused_ids, fused_scores)
+        reranked = self._rerank(query, candidates, generator=generator)
+        diverse = self._mmr(query_vectors[0], reranked, limit)
+        return diverse[:limit]
 
     def ask(
         self,
@@ -125,7 +160,7 @@ class KnowledgeBase:
         folder: str | None = None,
         file_type: str | None = None,
     ) -> tuple[str, list[SearchHit], CitationValidation]:
-        hits = self.search(query, tag=tag, folder=folder, file_type=file_type)
+        hits = self.search(query, tag=tag, folder=folder, file_type=file_type, generator=generator)
         context = "\n\n".join(f"[{i}] {hit.citation}\n{hit.text}" for i, hit in enumerate(hits, 1))
         prompt = f"""You answer questions using only the supplied personal notes.
 If the notes do not support an answer, say so. Cite claims with bracketed source numbers
@@ -341,6 +376,11 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
             return ChromaVectorAdapter(self.settings.home / "chroma")
         return None
 
+    def _retrieval_generator(self) -> Generator | None:
+        if self.settings.embed_provider == "ollama":
+            return OllamaGenerator(self.settings.ollama_url, self.settings.ollama_model)
+        return None
+
     def provider_status(self) -> dict:
         return {
             "embed_provider": self.settings.embed_provider,
@@ -360,7 +400,105 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
         stop = {"the", "and", "that", "this", "with", "from", "have", "were", "was", "for", "are", "but", "not", "into", "your"}
         return {token for token in re.findall(r"[a-z0-9_]+", text.lower()) if len(token) > 3 and token not in stop}
 
-    def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+    def _query_plan(self, query: str, generator: Generator | None = None) -> dict[str, object]:
+        expanded = self._fallback_expansions(query)
+        hyde = ""
+        if generator:
+            try:
+                response = generator.generate(
+                    "Rewrite this search query for personal note retrieval. "
+                    "Return compact JSON with keys variations, synonyms, hyde. "
+                    "variations is 2-4 alternate phrasings, synonyms is 3-8 related words, "
+                    "and hyde is a short hypothetical answer that would appear in relevant notes.\n\n"
+                    f"QUERY: {query}"
+                )
+                payload = self._json_object(response)
+                expanded.extend(str(item) for item in payload.get("variations", []) if str(item).strip())
+                synonyms = " ".join(str(item) for item in payload.get("synonyms", []) if str(item).strip())
+                if synonyms:
+                    expanded.append(f"{query} {synonyms}")
+                hyde = str(payload.get("hyde", "")).strip()
+            except Exception:
+                hyde = ""
+        if not hyde:
+            hyde = self._fallback_hyde(query, expanded)
+        deduped = []
+        seen = {query.strip().lower()}
+        for item in expanded:
+            normalized = item.strip()
+            key = normalized.lower()
+            if normalized and key not in seen:
+                deduped.append(normalized)
+                seen.add(key)
+        return {"expanded_queries": deduped[:5], "hyde": hyde}
+
+    @staticmethod
+    def _fallback_expansions(query: str) -> list[str]:
+        synonym_groups = [
+            {"car", "cars", "auto", "automobile", "vehicle", "vehicles"},
+            {"doc", "docs", "document", "documents", "file", "files", "note", "notes"},
+            {"search", "find", "lookup", "retrieve", "retrieval"},
+            {"fast", "quick", "speed", "latency", "performance"},
+            {"ai", "llm", "model", "agent", "assistant"},
+            {"pdf", "scan", "scanned", "ocr", "image"},
+        ]
+        tokens = set(re.findall(r"[a-z0-9_]+", query.lower()))
+        additions = sorted({term for group in synonym_groups if tokens & group for term in group})
+        return [f"{query} {' '.join(additions)}"] if additions else []
+
+    @staticmethod
+    def _fallback_hyde(query: str, expanded: list[str]) -> str:
+        terms = " ".join(expanded[:2]) if expanded else query
+        return f"Relevant notes may discuss {terms} and directly answer: {query}"
+
+    @staticmethod
+    def _json_object(text: str) -> dict:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return {}
+        payload = json.loads(match.group(0))
+        return payload if isinstance(payload, dict) else {}
+
+    def _vector_candidates(
+        self,
+        query_vector: list[float],
+        limit: int,
+        tag: str | None = None,
+        folder: str | None = None,
+        file_type: str | None = None,
+    ) -> list[tuple[int, float]]:
+        if self.vector_store and not tag:
+            where = self._chroma_where(folder=folder, file_type=file_type)
+            try:
+                return self.vector_store.query(query_vector, limit, where=where)
+            except Exception:
+                pass
+        return self.store.vector_search(query_vector, limit, tag=tag, folder=folder, file_type=file_type)
+
+    @staticmethod
+    def _chroma_where(folder: str | None = None, file_type: str | None = None) -> dict | None:
+        clauses = []
+        if folder:
+            clauses.append({"folder": folder})
+        if file_type:
+            clauses.append({"file_type": file_type})
+        if not clauses:
+            return None
+        if len(clauses) == 1:
+            return clauses[0]
+        return {"$and": clauses}
+
+    @staticmethod
+    def _reciprocal_rank_fusion(rankings: list[tuple[list[int], float]], k: int = 60) -> dict[int, float]:
+        scores: dict[int, float] = defaultdict(float)
+        for ids, weight in rankings:
+            for rank, chunk_id in enumerate(ids, 1):
+                scores[chunk_id] += weight / (k + rank)
+        return dict(scores)
+
+    def _rerank(self, query: str, hits: list[SearchHit], generator: Generator | None = None) -> list[SearchHit]:
+        qwen_order = self._qwen_rerank(query, hits[:20], generator) if generator else []
+        order_boost = {chunk_id: (len(qwen_order) - index) / max(1, len(qwen_order)) for index, chunk_id in enumerate(qwen_order)}
         terms = set(re.findall(r"[a-z0-9_]+", query.lower()))
         reranked: list[SearchHit] = []
         for hit in hits:
@@ -369,6 +507,7 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
             overlap = len(terms & text_terms) / max(1, len(terms))
             title_overlap = len(terms & title_terms) / max(1, len(terms))
             tag_overlap = len(terms & set(hit.tags)) / max(1, len(terms))
+            phrase_bonus = 0.12 if query.lower() in hit.text.lower() else 0.0
             citation_bonus = 0.05 if ("#L" in hit.citation or "#page=" in hit.citation) else 0.0
             reranked.append(
                 SearchHit(
@@ -376,11 +515,73 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
                     hit.text,
                     hit.title,
                     hit.citation,
-                    hit.score + 0.22 * overlap + 0.12 * title_overlap + 0.08 * tag_overlap + citation_bonus,
+                    hit.score
+                    + 0.30 * overlap
+                    + 0.14 * title_overlap
+                    + 0.08 * tag_overlap
+                    + 0.35 * order_boost.get(hit.chunk_id, 0.0)
+                    + phrase_bonus
+                    + citation_bonus,
                     hit.tags,
                 )
             )
         return sorted(reranked, key=lambda hit: hit.score, reverse=True)
+
+    def _qwen_rerank(self, query: str, hits: list[SearchHit], generator: Generator | None) -> list[int]:
+        if not generator or not hits:
+            return []
+        try:
+            candidates = "\n".join(f"{hit.chunk_id}: {hit.title}\n{hit.text[:700]}" for hit in hits)
+            response = generator.generate(
+                "Rerank these retrieved note chunks by relevance to the query. "
+                "Return JSON only, with key ranked_ids as the chunk ids in best-first order. "
+                "Prefer direct semantic relevance over keyword coincidence.\n\n"
+                f"QUERY: {query}\n\nCANDIDATES:\n{candidates}"
+            )
+            payload = self._json_object(response)
+            allowed = {hit.chunk_id for hit in hits}
+            return [int(item) for item in payload.get("ranked_ids", []) if int(item) in allowed]
+        except Exception:
+            return []
+
+    def _mmr(self, query_vector: list[float], hits: list[SearchHit], limit: int, lambda_mult: float = 0.72) -> list[SearchHit]:
+        if len(hits) <= limit:
+            return hits
+        vectors = self.store.vectors_by_ids([hit.chunk_id for hit in hits])
+        by_id = {hit.chunk_id: hit for hit in hits}
+        selected: list[int] = []
+        remaining = [hit.chunk_id for hit in hits]
+        max_score = max((hit.score for hit in hits), default=1.0) or 1.0
+        while remaining and len(selected) < limit:
+            best_id = None
+            best_score = -math.inf
+            for chunk_id in remaining:
+                hit = by_id[chunk_id]
+                vector = vectors.get(chunk_id, [])
+                relevance = hit.score / max_score
+                query_similarity = self._cosine(query_vector, vector) if vector else 0.0
+                duplicate_penalty = 0.0
+                if selected and vector:
+                    duplicate_penalty = max(self._cosine(vector, vectors.get(other_id, [])) for other_id in selected)
+                same_document_penalty = 0.12 if any(self._document_key(hit) == self._document_key(by_id[other_id]) for other_id in selected) else 0.0
+                score = lambda_mult * (0.75 * relevance + 0.25 * query_similarity) - (1 - lambda_mult) * duplicate_penalty - same_document_penalty
+                if score > best_score:
+                    best_id = chunk_id
+                    best_score = score
+            if best_id is None:
+                break
+            selected.append(best_id)
+            remaining.remove(best_id)
+        return [by_id[chunk_id] for chunk_id in selected]
+
+    @staticmethod
+    def _document_key(hit: SearchHit) -> str:
+        return hit.citation.split("#", 1)[0]
+
+    @staticmethod
+    def _cosine(left: list[float], right: list[float]) -> float:
+        denominator = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(x * x for x in right))
+        return sum(a * b for a, b in zip(left, right)) / denominator if denominator else 0.0
 
     def _validate_citations(self, answer: str, hits: list[SearchHit]) -> CitationValidation:
         cited_numbers = tuple(sorted({int(match) for match in REFERENCE_PATTERN.findall(answer)}))
