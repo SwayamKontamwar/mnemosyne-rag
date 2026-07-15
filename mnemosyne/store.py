@@ -570,16 +570,24 @@ class KnowledgeStore:
             "SELECT path, level, code, message, created_at FROM parse_diagnostics ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [
-            ParseDiagnostic(
-                path=row["path"],
-                level=row["level"],
-                code=row["code"],
-                message=row["message"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        return [self._diagnostic_from_row(row) for row in rows]
+
+    def diagnostics_for_path(self, path: str, limit: int = 5) -> list[ParseDiagnostic]:
+        rows = self.connection.execute(
+            "SELECT path, level, code, message, created_at FROM parse_diagnostics WHERE path = ? ORDER BY created_at DESC LIMIT ?",
+            (path, limit),
+        ).fetchall()
+        return [self._diagnostic_from_row(row) for row in rows]
+
+    @staticmethod
+    def _diagnostic_from_row(row: sqlite3.Row) -> ParseDiagnostic:
+        return ParseDiagnostic(
+            path=row["path"],
+            level=row["level"],
+            code=row["code"],
+            message=row["message"],
+            created_at=row["created_at"],
+        )
 
     def _chunk_rows(self, tag: str | None = None, folder: str | None = None, file_type: str | None = None) -> list[sqlite3.Row]:
         filters = []
