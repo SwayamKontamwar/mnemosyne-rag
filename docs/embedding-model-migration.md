@@ -16,7 +16,23 @@ Run:
 .\.venv\Scripts\python.exe -m tests.model_swap_evidence
 ```
 
-The command prints the complete vector read directly from SQLite before migration, the complete replacement vector read afterward, and proof fields for row identity, old-vector absence, query length, every stored vector length, and active embedding spaces.
+The command prints the complete vector read directly from SQLite before migration, the complete replacement vector read afterward, and proof fields for row identity, old-vector absence, query length, every stored vector length, and active embedding spaces. **This command uses a deterministic stub at the Ollama HTTP boundary. Its `2.0001, 2.0002, ...` vector is not a real `nomic-embed-text` embedding. It proves migration plumbing only.**
+
+This development machine does not have Ollama installed, so this release has not produced real `nomic-embed-text` weight evidence. Do not treat the committed plumbing JSON as proof of the real model's semantics or normalization. A real-model run requires an installed Ollama service with `nomic-embed-text` pulled and must additionally verify that `OllamaEmbedder.last_backend == "ollama"` so hash fallback cannot masquerade as model evidence.
+
+The committed `model-swap-evidence.json` and `model-migration-crash-evidence.json` files are UTF-8 without a BOM.
+
+## SQLite to Chroma crash recovery
+
+Embedding migration writes the new SQLite vectors and a `sqlite_committed` journal row in one SQLite transaction. Search refuses while any migration journal row is pending. Chroma is rebuilt in batches, verified against SQLite by ID, dimension, metadata, and vector values, and only then is the journal marked `completed`.
+
+Run the real parent-kill evidence:
+
+```powershell
+.\.venv\Scripts\python.exe -m tests.test_model_migration_crash
+```
+
+The worker signals after SQLite has committed and after only the first Chroma batch has been placed. The parent calls the OS process-kill API, requires a negative exit code, snapshots both stores and the full journal, confirms search refuses, recovers twice, and compares the complete canonical logical snapshots byte for byte. It also reports every filesystem path added, removed, or modified between stages.
 
 ## What the focused tests assert
 
@@ -27,7 +43,7 @@ The command prints the complete vector read directly from SQLite before migratio
 - Reads the row directly again and asserts its ID is unchanged, its complete vector differs, its length and metadata are 768, and its identity is `ollama:nomic-embed-text`.
 - Reads every vector in the chunks table and asserts the old complete vector occurs zero times and every stored vector is 768-wide.
 - Embeds a query through the new embedder, asserts it is 768-wide, asserts every stored vector has exactly that length, and executes search.
-- It does not prove the semantic quality of the real `nomic-embed-text` weights: the clean test fakes Ollama's local HTTP response deterministically so no model download is required. It does exercise the production Ollama client, migration, SQLite storage, and search path.
+- It does not prove the semantic quality, normalization, or real output values of `nomic-embed-text`: the clean test fakes Ollama's local HTTP response deterministically so no model download is required. It exercises the production Ollama client, migration, SQLite storage, and search path only.
 
 `test_chroma_model_swap_rebuilds_ids_and_removes_old_embeddings`:
 
@@ -44,6 +60,6 @@ The command prints the complete vector read directly from SQLite before migratio
 
 ## Limits
 
-- Migration is transactional in SQLite, but SQLite and Chroma do not share one cross-database transaction. If Chroma rebuilding fails after SQLite commits, Chroma identity remains stale and searches in Chroma mode refuse until ingest successfully rebuilds it.
+- SQLite and Chroma do not share one transaction. SQLite is the recovery source of truth. A durable pending journal prevents search while Chroma is old, empty, or partial; the next ingest rebuilds and verifies Chroma from SQLite before clearing that refusal.
 - A model serving different dimensions under the same unchanged model name is detected when a query or new embedding is produced. Mnemosyne cannot detect changed model weights that retain both the same configured name and dimensions; use a distinct model/version name when changing weights.
 - Existing databases without embedding metadata are treated as legacy/mismatched and fully re-embedded on the next ingest.

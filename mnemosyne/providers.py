@@ -4,10 +4,11 @@ import hashlib
 import json
 import math
 import re
+import struct
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 
 class Embedder(Protocol):
@@ -137,14 +138,47 @@ class ChromaVectorAdapter:
 
     def rebuild(
         self, ids: Sequence[str], vectors: Sequence[list[float]], metadata: Sequence[dict],
-        embedding_space: str, dimensions: int,
+        embedding_space: str, dimensions: int, checkpoint: Callable[[str], None] | None = None,
+        batch_size: int = 100,
     ) -> None:
         self.client.delete_collection(self.collection.name)
         self.collection = self.client.create_collection(
             self.collection.name,
             metadata={"hnsw:space": "cosine", "embedding_space": embedding_space, "embedding_dimensions": dimensions},
         )
-        self.add(ids, vectors, metadata)
+        for start in range(0, len(ids), batch_size):
+            stop = start + batch_size
+            self.add(ids[start:stop], vectors[start:stop], metadata[start:stop])
+            if checkpoint:
+                checkpoint("during_embedding_chroma_rebuild")
+
+    def manifest(self) -> dict[str, str]:
+        result = self.collection.get(include=["embeddings"])
+        embeddings = result.get("embeddings")
+        if embeddings is None:
+            embeddings = []
+        return {
+            str(item_id): hashlib.sha256(
+                b"".join(struct.pack("<f", float(value)) for value in vector)
+            ).hexdigest()
+            for item_id, vector in zip(result.get("ids") or [], embeddings)
+        }
+
+    def verify_vectors(self, ids: Sequence[str], vectors: Sequence[list[float]]) -> None:
+        result = self.collection.get(ids=list(ids), include=["embeddings"])
+        embeddings = result.get("embeddings")
+        if embeddings is None:
+            embeddings = []
+        actual = {str(item_id): list(vector) for item_id, vector in zip(result.get("ids") or [], embeddings)}
+        expected_ids = {str(item_id) for item_id in ids}
+        if set(actual) != expected_ids:
+            raise RuntimeError("Chroma rebuild IDs do not match SQLite")
+        for item_id, expected in zip(ids, vectors):
+            stored = actual[str(item_id)]
+            if len(stored) != len(expected):
+                raise RuntimeError(f"Chroma dimension mismatch for chunk {item_id}")
+            if max((abs(left - right) for left, right in zip(stored, expected)), default=0.0) > 1e-6:
+                raise RuntimeError(f"Chroma vector differs from SQLite vector for chunk {item_id}")
 
     def ensure_space(self, embedding_space: str, dimensions: int) -> None:
         metadata = self.collection.metadata or {}

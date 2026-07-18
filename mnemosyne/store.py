@@ -4,6 +4,7 @@ import json
 import math
 import re
 import sqlite3
+import struct
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from difflib import unified_diff
@@ -108,6 +109,16 @@ class KnowledgeStore:
                 code TEXT NOT NULL,
                 message TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS embedding_migrations (
+                id TEXT PRIMARY KEY,
+                from_spaces TEXT NOT NULL,
+                to_space TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                expected_manifest TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
             );
             CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
                 INSERT INTO chunks_fts(rowid, text, title) VALUES (new.id, new.text, new.title);
@@ -407,13 +418,71 @@ class KnowledgeStore:
     def all_chunk_texts(self) -> list[tuple[int, str]]:
         return [(int(row["id"]), str(row["text"])) for row in self.connection.execute("SELECT id, text FROM chunks ORDER BY id")]
 
-    def replace_all_vectors(self, rows: list[tuple[int, list[float]]], embedding_space: str, dimensions: int) -> None:
+    def begin_embedding_migration(
+        self, rows: list[tuple[int, list[float]]], embedding_space: str, dimensions: int,
+    ) -> dict:
         if any(len(vector) != dimensions for _, vector in rows):
             raise RuntimeError("embedding provider returned inconsistent vector dimensions")
+        from_spaces = sorted([list(item) for item in self.embedding_spaces()])
+        manifest = {
+            str(chunk_id): _vector_hash(vector)
+            for chunk_id, vector in rows
+        }
+        migration_id = sha256(json.dumps({
+            "from": from_spaces, "to": embedding_space, "dimensions": dimensions, "manifest": manifest,
+        }, sort_keys=True).encode()).hexdigest()[:24]
+        now = _utc_now()
         with self.connection:
+            self.connection.execute(
+                """INSERT INTO embedding_migrations(
+                       id, from_spaces, to_space, dimensions, expected_manifest, status, created_at, completed_at
+                   ) VALUES (?, ?, ?, ?, ?, 'sqlite_committed', ?, NULL)
+                   ON CONFLICT(id) DO UPDATE SET
+                       status='sqlite_committed', completed_at=NULL""",
+                (migration_id, json.dumps(from_spaces), embedding_space, dimensions, json.dumps(manifest, sort_keys=True), now),
+            )
             self.connection.executemany(
                 "UPDATE chunks SET vector = ?, embedding_space = ?, embedding_dimensions = ? WHERE id = ?",
                 [(json.dumps(vector), embedding_space, dimensions, chunk_id) for chunk_id, vector in rows],
+            )
+        return self.pending_embedding_migration() or {}
+
+    def pending_embedding_migration(self) -> dict | None:
+        row = self.connection.execute(
+            "SELECT * FROM embedding_migrations WHERE status != 'completed' ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "from_spaces": json.loads(row["from_spaces"]),
+            "to_space": row["to_space"],
+            "dimensions": int(row["dimensions"]),
+            "expected_manifest": json.loads(row["expected_manifest"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "completed_at": row["completed_at"],
+        }
+
+    def complete_embedding_migration(self, migration_id: str) -> None:
+        with self.connection:
+            cursor = self.connection.execute(
+                """UPDATE embedding_migrations
+                   SET status='completed', completed_at=?
+                   WHERE id=? AND status='sqlite_committed'""",
+                (_utc_now(), migration_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"embedding migration is not pending: {migration_id}")
+
+    def embedding_migration_journal(self) -> list[dict]:
+        return [dict(row) for row in self.connection.execute("SELECT * FROM embedding_migrations ORDER BY created_at, id")]
+
+    def assert_no_pending_embedding_migration(self) -> None:
+        pending = self.pending_embedding_migration()
+        if pending:
+            raise RuntimeError(
+                f"embedding migration {pending['id']} is incomplete; re-run ingest before searching"
             )
 
     def all_vector_rows(self) -> list[tuple[int, list[float], dict]]:
@@ -422,6 +491,12 @@ class KnowledgeStore:
             (int(row["id"]), json.loads(row["vector"]), self._vector_metadata_from_row(row))
             for row in rows
         ]
+
+    def vector_manifest(self) -> dict[str, str]:
+        return {
+            str(row["id"]): _vector_hash(json.loads(row["vector"]))
+            for row in self.connection.execute("SELECT id, vector FROM chunks ORDER BY id")
+        }
 
     @staticmethod
     def _validate_vector_rows(rows: list[sqlite3.Row], embedding_space: str | None, dimensions: int) -> None:
@@ -1086,6 +1161,10 @@ def _average(vectors: list[list[float]]) -> list[float]:
 
 def _content_hash(text: str) -> str:
     return sha256(text.encode()).hexdigest()
+
+
+def _vector_hash(vector: list[float]) -> str:
+    return sha256(b"".join(struct.pack("<f", float(value)) for value in vector)).hexdigest()
 
 
 def _utc_now() -> str:

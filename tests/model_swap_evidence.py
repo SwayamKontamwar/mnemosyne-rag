@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import argparse
 from pathlib import Path
 
 import mnemosyne.providers as providers
@@ -46,7 +47,7 @@ def stored_row(kb: KnowledgeBase) -> dict:
     }
 
 
-def main() -> None:
+def main(output: Path | None = None) -> None:
     original_urlopen = providers.urllib.request.urlopen
     try:
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +79,7 @@ def main() -> None:
             ]
             query_vector = second.embedder.embed(["new model query"])[0]
             evidence = {
+                "evidence_kind": "deterministic Ollama HTTP plumbing stub; not real nomic-embed-text weights",
                 "ingest_after_unchanged_file": {"indexed": ingest_result[0], "skipped": ingest_result[1]},
                 "before": before,
                 "after": after,
@@ -90,7 +92,11 @@ def main() -> None:
                     "active_embedding_spaces": sorted(second.store.embedding_spaces()),
                 },
             }
-            print(json.dumps(evidence, indent=2))
+            rendered = json.dumps(evidence, indent=2) + "\n"
+            if output:
+                output.write_text(rendered, encoding="utf-8")
+            else:
+                print(rendered, end="")
             first.store.connection.close()
             second.store.connection.close()
     finally:
@@ -98,4 +104,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path)
+    main(parser.parse_args().output)

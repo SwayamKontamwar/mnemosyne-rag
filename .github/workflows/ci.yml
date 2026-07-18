@@ -63,3 +63,4 @@ jobs:
         run: |
           pytest -q
           python -m tests.model_swap_evidence
+          python -m tests.test_model_migration_crash

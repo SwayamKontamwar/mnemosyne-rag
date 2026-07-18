@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from typing import Callable
 from zipfile import ZipFile
 
 from .config import Settings
@@ -22,7 +23,10 @@ DATE_PATTERN = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|(?:jan|feb|mar|apr|may|jun|ju
 
 
 class KnowledgeBase:
-    def __init__(self, settings: Settings, embedder: Embedder | None = None) -> None:
+    def __init__(
+        self, settings: Settings, embedder: Embedder | None = None,
+        crash_hook: Callable[[str], None] | None = None, chroma_rebuild_batch_size: int = 100,
+    ) -> None:
         self.settings = settings
         self.store = KnowledgeStore(settings.db_path)
         self.store.initialize()
@@ -38,8 +42,11 @@ class KnowledgeBase:
         self.embedder = embedder or self._default_embedder()
         self._embedding_dimensions = int(getattr(self.embedder, "dimensions", 0) or 0)
         self.vector_store = self._default_vector_store()
+        self._crash_hook = crash_hook
+        self._chroma_rebuild_batch_size = chroma_rebuild_batch_size
 
     def ingest(self, source: Path) -> tuple[int, int]:
+        self._recover_pending_embedding_migration()
         self._migrate_embedding_space_if_needed()
         indexed = skipped = 0
         for path in discover(source):
@@ -141,6 +148,7 @@ class KnowledgeBase:
         generator: Generator | None = None,
         as_of: str | None = None,
     ) -> list[SearchHit]:
+        self.store.assert_no_pending_embedding_migration()
         generator = generator or self._retrieval_generator()
         plan = self._query_plan(query, generator)
         candidate_limit = max(20, limit * 6)
@@ -449,7 +457,8 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
         replacement = [(chunk_id, vector) for (chunk_id, _), vector in zip(chunks, vectors)]
         if len(replacement) != len(chunks):
             raise RuntimeError("embedding provider returned fewer vectors than requested")
-        self.store.replace_all_vectors(replacement, expected, dimensions)
+        migration = self.store.begin_embedding_migration(replacement, expected, dimensions)
+        self._checkpoint("after_embedding_sqlite_commit")
         if self.vector_store:
             rows = self.store.all_vector_rows()
             self.vector_store.rebuild(
@@ -458,7 +467,43 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
                 [metadata for _, _, metadata in rows],
                 expected,
                 dimensions,
+                checkpoint=self._checkpoint,
+                batch_size=self._chroma_rebuild_batch_size,
             )
+            self._checkpoint("after_embedding_chroma_rebuild")
+            self.vector_store.verify_vectors(
+                [str(chunk_id) for chunk_id, _, _ in rows], [vector for _, vector, _ in rows]
+            )
+        self.store.complete_embedding_migration(migration["id"])
+
+    def _recover_pending_embedding_migration(self) -> None:
+        migration = self.store.pending_embedding_migration()
+        if not migration:
+            return
+        if self.store.vector_manifest() != migration["expected_manifest"]:
+            raise RuntimeError("SQLite vectors do not match the pending embedding migration journal")
+        spaces = self.store.embedding_spaces()
+        expected_space = (migration["to_space"], migration["dimensions"])
+        if spaces != {expected_space}:
+            raise RuntimeError("SQLite embedding state does not match the pending migration target")
+        if self.vector_store:
+            rows = self.store.all_vector_rows()
+            self.vector_store.rebuild(
+                [str(chunk_id) for chunk_id, _, _ in rows],
+                [vector for _, vector, _ in rows],
+                [metadata for _, _, metadata in rows],
+                migration["to_space"], migration["dimensions"], checkpoint=self._checkpoint,
+                batch_size=self._chroma_rebuild_batch_size,
+            )
+            self._checkpoint("after_embedding_chroma_rebuild")
+            self.vector_store.verify_vectors(
+                [str(chunk_id) for chunk_id, _, _ in rows], [vector for _, vector, _ in rows]
+            )
+        self.store.complete_embedding_migration(migration["id"])
+
+    def _checkpoint(self, name: str) -> None:
+        if self._crash_hook:
+            self._crash_hook(name)
 
     def _default_embedder(self) -> Embedder:
         if self.settings.embed_provider == "ollama":

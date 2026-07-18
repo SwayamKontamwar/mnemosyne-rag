@@ -1,0 +1,334 @@
+{
+  "process": {
+    "signal": "19752 during_embedding_chroma_rebuild",
+    "exit_code": -15,
+    "killed": true
+  },
+  "stages": {
+    "before": {
+      "sqlite": [
+        {
+          "id": 1,
+          "embedding_space": "hash:blake2b-v1",
+          "dimensions_metadata": 384,
+          "dimensions_actual": 384,
+          "vector_sha256": "35168b5cb2e553ab3659752b0c923063a9d4836e21b1ce7e7ed570f904dc417a"
+        },
+        {
+          "id": 2,
+          "embedding_space": "hash:blake2b-v1",
+          "dimensions_metadata": 384,
+          "dimensions_actual": 384,
+          "vector_sha256": "08b991536ff667509163fd21f880c529ba7411dd377f78f292a6ff783f3c9f4c"
+        }
+      ],
+      "chroma": [
+        {
+          "id": "1",
+          "embedding_space": "hash:blake2b-v1",
+          "dimensions_metadata": 384,
+          "dimensions_actual": 384,
+          "vector_sha256": "35168b5cb2e553ab3659752b0c923063a9d4836e21b1ce7e7ed570f904dc417a"
+        },
+        {
+          "id": "2",
+          "embedding_space": "hash:blake2b-v1",
+          "dimensions_metadata": 384,
+          "dimensions_actual": 384,
+          "vector_sha256": "08b991536ff667509163fd21f880c529ba7411dd377f78f292a6ff783f3c9f4c"
+        }
+      ],
+      "journal": [],
+      "state": {
+        "pending_migrations": [],
+        "sqlite_spaces": [
+          [
+            "hash:blake2b-v1",
+            384
+          ]
+        ],
+        "chroma_spaces": [
+          [
+            "hash:blake2b-v1",
+            384
+          ]
+        ]
+      },
+      "filesystem": {
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/data_level0.bin": "02890f97499e7236bbc8c3e54125e12b9fce3aa0ae8b5d4af50fed88b58652ee",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/header.bin": "a0e81c3b22454233bc12d0762f06dcca48261a75231cf87c79b75e69a6c00150",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/length.bin": "49e310188ff91cff702a0f9226ea425ed90f6c7ff60f9699a35ae8f72c7110d7",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/chroma.sqlite3": "69ebf4eb9da29c8e6e838ee411dc42b7378dda702094f4f59b872c9881d7b8f4",
+        "knowledge.db": "7b946169672aac72bf96a3807951c13b4a31ae63025c8b4eca4f6b3a03326e03"
+      }
+    },
+    "directly_after_kill": {
+      "sqlite": [
+        {
+          "id": 1,
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9"
+        },
+        {
+          "id": 2,
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9"
+        }
+      ],
+      "chroma": [
+        {
+          "id": "1",
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "145f57c59ce7852a1eda3f65c7185140858e158594ffafc782d66716844550bd"
+        }
+      ],
+      "journal": [
+        {
+          "id": "afeed0f3a53648ac8bef12e2",
+          "from_spaces": "[[\"hash:blake2b-v1\", 384]]",
+          "to_space": "test:model-b",
+          "dimensions": 768,
+          "expected_manifest": "{\"1\": \"695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9\", \"2\": \"695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9\"}",
+          "status": "sqlite_committed",
+          "created_at": "2026-07-18T03:06:25.854122Z",
+          "completed_at": null
+        }
+      ],
+      "state": {
+        "pending_migrations": [
+          "afeed0f3a53648ac8bef12e2"
+        ],
+        "sqlite_spaces": [
+          [
+            "test:model-b",
+            768
+          ]
+        ],
+        "chroma_spaces": [
+          [
+            "test:model-b",
+            768
+          ]
+        ]
+      },
+      "filesystem": {
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/data_level0.bin": "98102e915e46d617a82f446f0683d6b132fee0dba2095eb47acc172eda5254b6",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/header.bin": "03cb3ac86f3e5bcb15e88b9bf99f760ec6b33e31d64a699e129b49868db6d733",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/length.bin": "da5948f6ea4b4de429908235eae223fc0dbd049eaf718be1323027efaba4b78d",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/data_level0.bin": "02890f97499e7236bbc8c3e54125e12b9fce3aa0ae8b5d4af50fed88b58652ee",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/header.bin": "a0e81c3b22454233bc12d0762f06dcca48261a75231cf87c79b75e69a6c00150",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/length.bin": "49e310188ff91cff702a0f9226ea425ed90f6c7ff60f9699a35ae8f72c7110d7",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/chroma.sqlite3": "1d69635b756ffa7ba3c83a0caa869bb354d1e9142c94a8da3c40dc6791d9665a",
+        "knowledge.db": "057d7b183846dc0a4af39c29f47e4bb7022bebb928759adfaa19f6b5fec6c9dd"
+      }
+    },
+    "after_recovery_one": {
+      "sqlite": [
+        {
+          "id": 1,
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9"
+        },
+        {
+          "id": 2,
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9"
+        }
+      ],
+      "chroma": [
+        {
+          "id": "1",
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "145f57c59ce7852a1eda3f65c7185140858e158594ffafc782d66716844550bd"
+        },
+        {
+          "id": "2",
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "145f57c59ce7852a1eda3f65c7185140858e158594ffafc782d66716844550bd"
+        }
+      ],
+      "journal": [
+        {
+          "id": "afeed0f3a53648ac8bef12e2",
+          "from_spaces": "[[\"hash:blake2b-v1\", 384]]",
+          "to_space": "test:model-b",
+          "dimensions": 768,
+          "expected_manifest": "{\"1\": \"695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9\", \"2\": \"695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9\"}",
+          "status": "completed",
+          "created_at": "2026-07-18T03:06:25.854122Z",
+          "completed_at": "2026-07-18T03:06:26.321904Z"
+        }
+      ],
+      "state": {
+        "pending_migrations": [],
+        "sqlite_spaces": [
+          [
+            "test:model-b",
+            768
+          ]
+        ],
+        "chroma_spaces": [
+          [
+            "test:model-b",
+            768
+          ]
+        ]
+      },
+      "filesystem": {
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/data_level0.bin": "98102e915e46d617a82f446f0683d6b132fee0dba2095eb47acc172eda5254b6",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/header.bin": "03cb3ac86f3e5bcb15e88b9bf99f760ec6b33e31d64a699e129b49868db6d733",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/length.bin": "da5948f6ea4b4de429908235eae223fc0dbd049eaf718be1323027efaba4b78d",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/data_level0.bin": "5abaefc119f395b8ac9e4745bbb6fc7e627968872cc7077f917d8e459e299cac",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/header.bin": "03cb3ac86f3e5bcb15e88b9bf99f760ec6b33e31d64a699e129b49868db6d733",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/length.bin": "daedf05edcb49225f7edade26c1f8bdbb2ec337913a51380ee4c217de642f91d",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/data_level0.bin": "02890f97499e7236bbc8c3e54125e12b9fce3aa0ae8b5d4af50fed88b58652ee",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/header.bin": "a0e81c3b22454233bc12d0762f06dcca48261a75231cf87c79b75e69a6c00150",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/length.bin": "49e310188ff91cff702a0f9226ea425ed90f6c7ff60f9699a35ae8f72c7110d7",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/chroma.sqlite3": "fb26e432ed29f933642f72c653526cc5701e7d567db122ba20bbdd05698bee53",
+        "knowledge.db": "369d257dfdb88fee431b0d72d72f0ed42114ee30bb9cd2e36d4ceab919d17b41"
+      }
+    },
+    "after_recovery_two": {
+      "sqlite": [
+        {
+          "id": 1,
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9"
+        },
+        {
+          "id": 2,
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9"
+        }
+      ],
+      "chroma": [
+        {
+          "id": "1",
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "145f57c59ce7852a1eda3f65c7185140858e158594ffafc782d66716844550bd"
+        },
+        {
+          "id": "2",
+          "embedding_space": "test:model-b",
+          "dimensions_metadata": 768,
+          "dimensions_actual": 768,
+          "vector_sha256": "145f57c59ce7852a1eda3f65c7185140858e158594ffafc782d66716844550bd"
+        }
+      ],
+      "journal": [
+        {
+          "id": "afeed0f3a53648ac8bef12e2",
+          "from_spaces": "[[\"hash:blake2b-v1\", 384]]",
+          "to_space": "test:model-b",
+          "dimensions": 768,
+          "expected_manifest": "{\"1\": \"695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9\", \"2\": \"695599f1e04e26e77519cbecf70a1ecd7a8db5c2c895099f0c7ecd616cfd96a9\"}",
+          "status": "completed",
+          "created_at": "2026-07-18T03:06:25.854122Z",
+          "completed_at": "2026-07-18T03:06:26.321904Z"
+        }
+      ],
+      "state": {
+        "pending_migrations": [],
+        "sqlite_spaces": [
+          [
+            "test:model-b",
+            768
+          ]
+        ],
+        "chroma_spaces": [
+          [
+            "test:model-b",
+            768
+          ]
+        ]
+      },
+      "filesystem": {
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/data_level0.bin": "98102e915e46d617a82f446f0683d6b132fee0dba2095eb47acc172eda5254b6",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/header.bin": "03cb3ac86f3e5bcb15e88b9bf99f760ec6b33e31d64a699e129b49868db6d733",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/length.bin": "da5948f6ea4b4de429908235eae223fc0dbd049eaf718be1323027efaba4b78d",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/data_level0.bin": "5abaefc119f395b8ac9e4745bbb6fc7e627968872cc7077f917d8e459e299cac",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/header.bin": "03cb3ac86f3e5bcb15e88b9bf99f760ec6b33e31d64a699e129b49868db6d733",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/length.bin": "daedf05edcb49225f7edade26c1f8bdbb2ec337913a51380ee4c217de642f91d",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/data_level0.bin": "02890f97499e7236bbc8c3e54125e12b9fce3aa0ae8b5d4af50fed88b58652ee",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/header.bin": "a0e81c3b22454233bc12d0762f06dcca48261a75231cf87c79b75e69a6c00150",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/length.bin": "49e310188ff91cff702a0f9226ea425ed90f6c7ff60f9699a35ae8f72c7110d7",
+        "chroma/6be8569f-3303-4c01-9d8d-89c7e7b496b1/link_lists.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "chroma/chroma.sqlite3": "fb26e432ed29f933642f72c653526cc5701e7d567db122ba20bbdd05698bee53",
+        "knowledge.db": "369d257dfdb88fee431b0d72d72f0ed42114ee30bb9cd2e36d4ceab919d17b41"
+      }
+    }
+  },
+  "changes": {
+    "before_to_kill": {
+      "added": [
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/data_level0.bin",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/header.bin",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/length.bin",
+        "chroma/1c049d9d-bde2-4a1d-9028-bc077ac0651b/link_lists.bin"
+      ],
+      "removed": [],
+      "modified": [
+        "chroma/chroma.sqlite3",
+        "knowledge.db"
+      ]
+    },
+    "recovery_one": {
+      "added": [
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/data_level0.bin",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/header.bin",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/length.bin",
+        "chroma/397b4d4a-3500-4446-beaa-881611ccccef/link_lists.bin"
+      ],
+      "removed": [],
+      "modified": [
+        "chroma/chroma.sqlite3",
+        "knowledge.db"
+      ]
+    },
+    "recovery_two": {
+      "added": [],
+      "removed": [],
+      "modified": []
+    }
+  },
+  "proof": {
+    "search_refused_while_pending": true,
+    "logical_recovery_two_byte_equal": true,
+    "sqlite_ids": [
+      1,
+      2
+    ],
+    "chroma_ids": [
+      "1",
+      "2"
+    ]
+  }
+}

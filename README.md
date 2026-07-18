@@ -104,6 +104,7 @@ python -m venv .venv-clean
 .\.venv-clean\Scripts\python.exe -m pip install -e ".[dev,full]"
 .\.venv-clean\Scripts\python.exe -m pytest -q
 .\.venv-clean\Scripts\python.exe -m tests.model_swap_evidence
+.\.venv-clean\Scripts\python.exe -m tests.test_model_migration_crash
 ```
 
 macOS or Linux:
@@ -349,6 +350,7 @@ Core components:
 pip install -e '.[dev,full]'
 pytest -q
 python -m tests.model_swap_evidence
+python -m tests.test_model_migration_crash
 docker compose build mnemosyne
 ```
 
@@ -362,6 +364,7 @@ The test suite covers:
 - chunk vector reuse by content hash
 - full re-embedding and Chroma rebuilding when the embedding model changes
 - model-identity and vector-dimension validation before similarity scoring
+- journaled refusal and repeatable recovery when a process is killed between SQLite migration and Chroma completion
 - FTS/vector retrieval
 - Ollama HTTP protocol behavior
 - Chroma persistence and indexed search
