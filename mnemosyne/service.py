@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import threading
 from collections import defaultdict
@@ -29,15 +30,17 @@ class KnowledgeBase:
         if preferences:
             self.settings = replace(
                 settings,
-                embed_provider=str(preferences.get("embed_provider", settings.embed_provider)),
-                embed_model=str(preferences.get("embed_model", settings.embed_model)),
-                ollama_model=str(preferences.get("ollama_model", settings.ollama_model)),
-                vector_provider=str(preferences.get("vector_provider", settings.vector_provider)),
+                embed_provider=settings.embed_provider if "MNEMO_EMBED_PROVIDER" in os.environ else str(preferences.get("embed_provider", settings.embed_provider)),
+                embed_model=settings.embed_model if "OLLAMA_EMBED_MODEL" in os.environ else str(preferences.get("embed_model", settings.embed_model)),
+                ollama_model=settings.ollama_model if "OLLAMA_MODEL" in os.environ else str(preferences.get("ollama_model", settings.ollama_model)),
+                vector_provider=settings.vector_provider if "MNEMO_VECTOR_PROVIDER" in os.environ else str(preferences.get("vector_provider", settings.vector_provider)),
             )
         self.embedder = embedder or self._default_embedder()
+        self._embedding_dimensions = int(getattr(self.embedder, "dimensions", 0) or 0)
         self.vector_store = self._default_vector_store()
 
     def ingest(self, source: Path) -> tuple[int, int]:
+        self._migrate_embedding_space_if_needed()
         indexed = skipped = 0
         for path in discover(source):
             digest = file_digest(path)
@@ -79,7 +82,9 @@ class KnowledgeBase:
                     "The parser found a document but no searchable chunks were produced.",
                 )
                 continue
-            reusable_vectors = self.store.active_vectors_by_hash(absolute)
+            reusable_vectors = self.store.active_vectors_by_hash(
+                absolute, self._embedding_space(), self._known_embedding_dimensions()
+            )
             vectors: list[list[float] | None] = []
             to_embed: list[tuple[int, str]] = []
             for index, chunk in enumerate(chunks):
@@ -92,9 +97,11 @@ class KnowledgeBase:
                     to_embed.append((index, chunk.text))
             if to_embed:
                 embedded = self.embedder.embed([text for _, text in to_embed])
+                self._accept_dimensions(embedded)
                 for (index, _), vector in zip(to_embed, embedded):
                     vectors[index] = vector
             prepared_vectors = [vector for vector in vectors if vector is not None]
+            self._accept_dimensions(prepared_vectors)
             primary = documents[0]
             revision = self.store.replace_document(
                 absolute,
@@ -109,8 +116,11 @@ class KnowledgeBase:
                     "links": list(primary.links),
                     "content": "\n\n".join(document.text for document in documents),
                 },
+                self._embedding_space(),
+                self._known_embedding_dimensions(),
             )
             if self.vector_store:
+                self.vector_store.ensure_space(self._embedding_space(), self._known_embedding_dimensions())
                 for key in ("inserted", "closed"):
                     rows = revision.get(key, [])
                     self.vector_store.add(
@@ -139,6 +149,7 @@ class KnowledgeBase:
         if plan["hyde"]:
             semantic_texts.append(plan["hyde"])
         query_vectors = self.embedder.embed(semantic_texts)
+        self._accept_dimensions(query_vectors)
         weighted_rankings: list[tuple[list[int], float]] = []
 
         for expanded_query in [query, *plan["expanded_queries"]]:
@@ -396,6 +407,59 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
     def diagnostics(self, limit: int = 100) -> list[dict]:
         return [diagnostic.__dict__ for diagnostic in self.store.list_diagnostics(limit)]
 
+    def _embedding_space(self) -> str:
+        explicit = getattr(self.embedder, "model_identity", None)
+        if explicit:
+            return str(explicit)
+        if self.settings.embed_provider == "hash":
+            return "hash:blake2b-v1"
+        return f"{self.settings.embed_provider}:{self.settings.embed_model}"
+
+    def _known_embedding_dimensions(self) -> int:
+        if self._embedding_dimensions:
+            return self._embedding_dimensions
+        matching = {dimensions for space, dimensions in self.store.embedding_spaces() if space == self._embedding_space()}
+        return next(iter(matching)) if len(matching) == 1 else 0
+
+    def _accept_dimensions(self, vectors: list[list[float]]) -> None:
+        if not vectors:
+            return
+        dimensions = {len(vector) for vector in vectors}
+        if len(dimensions) != 1:
+            raise RuntimeError(f"embedding provider returned mixed dimensions: {sorted(dimensions)}")
+        actual = dimensions.pop()
+        if self._embedding_dimensions and self._embedding_dimensions != actual:
+            raise RuntimeError(
+                f"embedding provider dimension changed during this run: {self._embedding_dimensions} to {actual}"
+            )
+        self._embedding_dimensions = actual
+
+    def _migrate_embedding_space_if_needed(self) -> None:
+        spaces = self.store.embedding_spaces()
+        if not spaces:
+            return
+        expected = self._embedding_space()
+        known_dimensions = self._known_embedding_dimensions()
+        if spaces == {(expected, known_dimensions)}:
+            return
+        chunks = self.store.all_chunk_texts()
+        vectors = self.embedder.embed([text for _, text in chunks])
+        self._accept_dimensions(vectors)
+        dimensions = self._known_embedding_dimensions()
+        replacement = [(chunk_id, vector) for (chunk_id, _), vector in zip(chunks, vectors)]
+        if len(replacement) != len(chunks):
+            raise RuntimeError("embedding provider returned fewer vectors than requested")
+        self.store.replace_all_vectors(replacement, expected, dimensions)
+        if self.vector_store:
+            rows = self.store.all_vector_rows()
+            self.vector_store.rebuild(
+                [str(chunk_id) for chunk_id, _, _ in rows],
+                [vector for _, vector, _ in rows],
+                [metadata for _, _, metadata in rows],
+                expected,
+                dimensions,
+            )
+
     def _default_embedder(self) -> Embedder:
         if self.settings.embed_provider == "ollama":
             return OllamaEmbedder(self.settings.ollama_url, self.settings.embed_model)
@@ -501,10 +565,15 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
         if self.vector_store and not tag:
             where = self._chroma_where(folder=folder, file_type=file_type, as_of=as_of)
             try:
-                return self.vector_store.query(query_vector, limit, where=where)
+                return self.vector_store.query(
+                    query_vector, limit, where=where, embedding_space=self._embedding_space()
+                )
             except Exception:
                 pass
-        return self.store.vector_search(query_vector, limit, tag=tag, folder=folder, file_type=file_type, as_of=as_of)
+        return self.store.vector_search(
+            query_vector, limit, tag=tag, folder=folder, file_type=file_type, as_of=as_of,
+            embedding_space=self._embedding_space(),
+        )
 
     @staticmethod
     def _chroma_where(folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> dict | None:

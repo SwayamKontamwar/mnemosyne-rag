@@ -51,6 +51,7 @@ class KnowledgeStore:
                 start_line INTEGER, end_line INTEGER, page INTEGER,
                 revision_id INTEGER, document_version INTEGER DEFAULT 1,
                 content_hash TEXT DEFAULT '', valid_from TEXT, valid_to TEXT,
+                embedding_space TEXT DEFAULT '', embedding_dimensions INTEGER DEFAULT 0,
                 FOREIGN KEY(document_path) REFERENCES documents(path)
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -142,6 +143,8 @@ class KnowledgeStore:
                 "content_hash": "TEXT DEFAULT ''",
                 "valid_from": "TEXT",
                 "valid_to": "TEXT",
+                "embedding_space": "TEXT DEFAULT ''",
+                "embedding_dimensions": "INTEGER DEFAULT 0",
             },
         )
         self._backfill_revisions()
@@ -151,10 +154,12 @@ class KnowledgeStore:
         row = self.connection.execute("SELECT digest FROM documents WHERE path = ? AND deleted_at IS NULL", (path,)).fetchone()
         return row["digest"] if row else None
 
-    def active_vectors_by_hash(self, path: str) -> dict[str, list[list[float]]]:
+    def active_vectors_by_hash(self, path: str, embedding_space: str, dimensions: int) -> dict[str, list[list[float]]]:
         rows = self.connection.execute(
-            "SELECT content_hash, vector FROM chunks WHERE document_path = ? AND valid_to IS NULL",
-            (path,),
+            """SELECT content_hash, vector FROM chunks
+               WHERE document_path = ? AND valid_to IS NULL
+                 AND embedding_space = ? AND embedding_dimensions = ?""",
+            (path, embedding_space, dimensions),
         ).fetchall()
         vectors: dict[str, list[list[float]]] = defaultdict(list)
         for row in rows:
@@ -162,7 +167,10 @@ class KnowledgeStore:
                 vectors[row["content_hash"]].append(json.loads(row["vector"]))
         return dict(vectors)
 
-    def replace_document(self, path: str, digest: str, chunks: Iterable[tuple[Chunk, list[float]]], metadata: dict) -> dict:
+    def replace_document(
+        self, path: str, digest: str, chunks: Iterable[tuple[Chunk, list[float]]], metadata: dict,
+        embedding_space: str, embedding_dimensions: int,
+    ) -> dict:
         prepared = list(chunks)
         now = _utc_now()
         content = str(metadata.get("content") or "\n\n".join(chunk.text for chunk, _ in prepared))
@@ -182,7 +190,8 @@ class KnowledgeStore:
         ).fetchall()
         active_by_hash: dict[str, list[sqlite3.Row]] = defaultdict(list)
         for row in active_rows:
-            active_by_hash[row["content_hash"] or _content_hash(row["text"])].append(row)
+            if row["embedding_space"] == embedding_space and row["embedding_dimensions"] == embedding_dimensions:
+                active_by_hash[row["content_hash"] or _content_hash(row["text"])].append(row)
         reused_ids: list[int] = []
         inserted: list[tuple[int, list[float], dict]] = []
         closed: list[tuple[int, list[float], dict]] = []
@@ -241,8 +250,9 @@ class KnowledgeStore:
                 cursor = self.connection.execute(
                     """
                     INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page,
-                                       revision_id,document_version,content_hash,valid_from,valid_to)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+                                       revision_id,document_version,content_hash,valid_from,valid_to,
+                                       embedding_space,embedding_dimensions)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)
                     """,
                     (
                         chunk.document_path,
@@ -259,10 +269,14 @@ class KnowledgeStore:
                         version,
                         content_hash,
                         now,
+                        embedding_space,
+                        embedding_dimensions,
                     )
                 )
                 chunk_id = int(cursor.lastrowid)
-                inserted.append((chunk_id, vector, self._vector_metadata(path, chunk, citation, now, None, content_hash)))
+                inserted.append((chunk_id, vector, self._vector_metadata(
+                    path, chunk, citation, now, None, content_hash, embedding_space, embedding_dimensions
+                )))
             for remaining in active_by_hash.values():
                 for row in remaining:
                     self.connection.execute("UPDATE chunks SET valid_to = ? WHERE id = ?", (now, row["id"]))
@@ -369,13 +383,58 @@ class KnowledgeStore:
         ).fetchall()
         return [row["id"] for row in rows]
 
-    def vector_search(self, query_vector: list[float], limit: int = 20, tag: str | None = None, folder: str | None = None, file_type: str | None = None, as_of: str | None = None) -> list[tuple[int, float]]:
+    def vector_search(
+        self, query_vector: list[float], limit: int = 20, tag: str | None = None,
+        folder: str | None = None, file_type: str | None = None, as_of: str | None = None,
+        embedding_space: str | None = None,
+    ) -> list[tuple[int, float]]:
         rows = self._chunk_rows(tag=tag, folder=folder, file_type=file_type, as_of=as_of)
+        self._validate_vector_rows(rows, embedding_space, len(query_vector))
         scored = [
             (row["id"], _cosine(query_vector, json.loads(row["vector"])))
             for row in rows
         ]
         return sorted(scored, key=lambda item: item[1], reverse=True)[:limit]
+
+    def embedding_spaces(self) -> set[tuple[str, int]]:
+        return {
+            (str(row["embedding_space"] or ""), int(row["embedding_dimensions"] or 0))
+            for row in self.connection.execute(
+                "SELECT DISTINCT embedding_space, embedding_dimensions FROM chunks"
+            )
+        }
+
+    def all_chunk_texts(self) -> list[tuple[int, str]]:
+        return [(int(row["id"]), str(row["text"])) for row in self.connection.execute("SELECT id, text FROM chunks ORDER BY id")]
+
+    def replace_all_vectors(self, rows: list[tuple[int, list[float]]], embedding_space: str, dimensions: int) -> None:
+        if any(len(vector) != dimensions for _, vector in rows):
+            raise RuntimeError("embedding provider returned inconsistent vector dimensions")
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE chunks SET vector = ?, embedding_space = ?, embedding_dimensions = ? WHERE id = ?",
+                [(json.dumps(vector), embedding_space, dimensions, chunk_id) for chunk_id, vector in rows],
+            )
+
+    def all_vector_rows(self) -> list[tuple[int, list[float], dict]]:
+        rows = self.connection.execute("SELECT * FROM chunks ORDER BY id").fetchall()
+        return [
+            (int(row["id"]), json.loads(row["vector"]), self._vector_metadata_from_row(row))
+            for row in rows
+        ]
+
+    @staticmethod
+    def _validate_vector_rows(rows: list[sqlite3.Row], embedding_space: str | None, dimensions: int) -> None:
+        for row in rows:
+            stored = json.loads(row["vector"])
+            if embedding_space is not None and row["embedding_space"] != embedding_space:
+                raise RuntimeError(
+                    f"mixed embedding spaces: query={embedding_space!r}, chunk {row['id']}={row['embedding_space']!r}; re-run ingest"
+                )
+            if row["embedding_dimensions"] != dimensions or len(stored) != dimensions:
+                raise RuntimeError(
+                    f"embedding dimension mismatch: query={dimensions}, chunk {row['id']} metadata={row['embedding_dimensions']} stored={len(stored)}; re-run ingest"
+                )
 
     def chunks_for_document(self, name: str, as_of: str | None = None) -> list[sqlite3.Row]:
         time_filter, params = self._time_filter_sql(as_of)
@@ -851,7 +910,10 @@ class KnowledgeStore:
             return f"{path}?rev={version}#L{start_line}-L{end_line}"
         return f"{path}?rev={version}"
 
-    def _vector_metadata(self, path: str, chunk: Chunk, citation: str, valid_from: str, valid_to: str | None, content_hash: str) -> dict:
+    def _vector_metadata(
+        self, path: str, chunk: Chunk, citation: str, valid_from: str, valid_to: str | None,
+        content_hash: str, embedding_space: str, embedding_dimensions: int,
+    ) -> dict:
         return {
             "document_path": path,
             "title": chunk.title,
@@ -863,6 +925,8 @@ class KnowledgeStore:
             "valid_to": valid_to or "__open__",
             "valid_to_sort": valid_to or "9999-12-31T23:59:59.999999Z",
             "content_hash": content_hash,
+            "embedding_space": embedding_space,
+            "embedding_dimensions": embedding_dimensions,
         }
 
     def _vector_metadata_from_row(self, row: sqlite3.Row, valid_to: str | None = None) -> dict:
@@ -877,6 +941,8 @@ class KnowledgeStore:
             "valid_to": valid_to or row["valid_to"] or "__open__",
             "valid_to_sort": valid_to or row["valid_to"] or "9999-12-31T23:59:59.999999Z",
             "content_hash": row["content_hash"],
+            "embedding_space": row["embedding_space"],
+            "embedding_dimensions": row["embedding_dimensions"],
         }
 
     def _hit_from_row(self, row: sqlite3.Row, score: float) -> SearchHit:
@@ -1005,6 +1071,8 @@ class KnowledgeStore:
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        raise RuntimeError(f"refusing cosine similarity across dimensions {len(left)} and {len(right)}")
     denominator = math.sqrt(sum(x*x for x in left)) * math.sqrt(sum(x*x for x in right))
     return sum(a*b for a, b in zip(left, right)) / denominator if denominator else 0.0
 

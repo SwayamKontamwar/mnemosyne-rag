@@ -13,7 +13,7 @@ import httpx
 from mnemosyne.config import Settings
 from mnemosyne.ingest import chunk_document, parse
 from mnemosyne.models import SearchHit, SourceDocument
-from mnemosyne.providers import OllamaEmbedder, OllamaGenerator
+from mnemosyne.providers import HashingEmbedder, OllamaEmbedder, OllamaGenerator
 from mnemosyne.service import KnowledgeBase
 
 
@@ -30,6 +30,19 @@ class CountingEmbedder:
             seed = sum(ord(char) for char in text)
             vectors.append([float(seed % 997), float(len(text) % 251), 1.0])
         return vectors
+
+
+class ModelSpaceEmbedder:
+    def __init__(self, identity: str, dimensions: int, offset: float) -> None:
+        self.model_identity = identity
+        self.dimensions = dimensions
+        self.offset = offset
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [self.offset + (index + 1) / 10_000 for index in range(self.dimensions)]
+            for _ in texts
+        ]
 
 
 def test_chunks_keep_line_citations():
@@ -110,6 +123,140 @@ def test_incremental_reindex_reuses_unchanged_chunk_vectors(tmp_path: Path):
     assert len(active) == 2
     assert any("first block alpha stays" in chunk.text and chunk.document_version == 1 for chunk in active)
     assert any("second block gamma changed" in chunk.text and chunk.document_version == 2 for chunk in active)
+
+
+def test_unchanged_file_hash_to_ollama_swap_replaces_actual_sqlite_vector_384_to_768(tmp_path: Path, monkeypatch):
+    note = tmp_path / "unchanged.md"
+    note.write_text("An unchanged note must move into the new embedding space.")
+    settings = Settings(
+        tmp_path / "data", tmp_path / "data" / "knowledge.db",
+        embed_provider="hash", embed_model="offline-hash", vector_provider="sqlite",
+    )
+    first = KnowledgeBase(settings, embedder=HashingEmbedder(384))
+    assert first.ingest(note) == (1, 0)
+    before = first.store.connection.execute(
+        "SELECT id, vector, embedding_space, embedding_dimensions FROM chunks WHERE valid_to IS NULL"
+    ).fetchone()
+    before_vector = json.loads(before["vector"])
+    assert len(before_vector) == 384
+    assert before["embedding_space"] == "hash:blake2b-v1"
+    assert before["embedding_dimensions"] == 384
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps({"embeddings": [[2.0 + (index + 1) / 10_000 for index in range(768)]]}).encode()
+
+    monkeypatch.setattr("mnemosyne.providers.urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse())
+    second_settings = Settings(
+        settings.home, settings.db_path,
+        ollama_url="http://ollama.test", embed_provider="ollama", embed_model="nomic-embed-text", vector_provider="sqlite",
+    )
+    second = KnowledgeBase(
+        second_settings, embedder=OllamaEmbedder("http://ollama.test", "nomic-embed-text", dimensions=768)
+    )
+    assert second.ingest(note) == (0, 1)
+    after = second.store.connection.execute(
+        "SELECT id, vector, embedding_space, embedding_dimensions FROM chunks WHERE valid_to IS NULL"
+    ).fetchone()
+    after_vector = json.loads(after["vector"])
+    assert after["id"] == before["id"]
+    assert after_vector != before_vector
+    assert len(after_vector) == 768
+    assert after["embedding_space"] == "ollama:nomic-embed-text"
+    assert after["embedding_dimensions"] == 768
+    all_stored = [json.loads(row["vector"]) for row in second.store.connection.execute("SELECT vector FROM chunks")]
+    assert before_vector not in all_stored
+    assert {len(vector) for vector in all_stored} == {768}
+    assert second.store.embedding_spaces() == {("ollama:nomic-embed-text", 768)}
+    query_vector = second.embedder.embed(["new model query"])[0]
+    assert len(query_vector) == 768
+    assert [len(vector) for vector in all_stored] == [len(query_vector)] * len(all_stored)
+    assert second.search("new model query")
+
+
+def test_chroma_model_swap_rebuilds_ids_and_removes_old_embeddings(tmp_path: Path):
+    note = tmp_path / "chroma-swap.md"
+    note.write_text("Chroma must replace this unchanged chunk rather than append beside it.")
+    settings = Settings(
+        tmp_path / "data", tmp_path / "data" / "knowledge.db",
+        embed_provider="test", embed_model="model-a", vector_provider="chroma",
+    )
+    first = KnowledgeBase(settings, embedder=ModelSpaceEmbedder("test:model-a", 384, 1.0))
+    first.ingest(note)
+    before = first.vector_store.collection.get(include=["embeddings", "metadatas"])
+    before_ids = list(before["ids"])
+    before_vector = list(before["embeddings"][0])
+    assert len(before_ids) == 1
+    assert len(before_vector) == 384
+
+    second = KnowledgeBase(
+        Settings(settings.home, settings.db_path, embed_provider="test", embed_model="model-b", vector_provider="chroma"),
+        embedder=ModelSpaceEmbedder("test:model-b", 768, 2.0),
+    )
+    second.ingest(note)
+    after = second.vector_store.collection.get(include=["embeddings", "metadatas"])
+    after_vector = list(after["embeddings"][0])
+    assert list(after["ids"]) == before_ids
+    assert second.vector_store.collection.count() == 1
+    assert after_vector != before_vector
+    assert len(after_vector) == 768
+    assert all(metadata["embedding_space"] == "test:model-b" for metadata in after["metadatas"])
+    assert all(metadata["embedding_dimensions"] == 768 for metadata in after["metadatas"])
+    assert before_vector not in [list(vector) for vector in after["embeddings"]]
+
+
+def test_search_refuses_mixed_model_or_dimension_before_cosine(tmp_path: Path, monkeypatch):
+    note = tmp_path / "mixed.md"
+    note.write_text("A plausible score must never be computed across incompatible spaces.")
+    settings = Settings(
+        tmp_path / "data", tmp_path / "data" / "knowledge.db",
+        embed_provider="test", embed_model="model-b", vector_provider="sqlite",
+    )
+    kb = KnowledgeBase(settings, embedder=ModelSpaceEmbedder("test:model-b", 768, 2.0))
+    kb.ingest(note)
+    with kb.store.connection:
+        kb.store.connection.execute(
+            "UPDATE chunks SET vector = ?, embedding_space = ?, embedding_dimensions = ?",
+            (json.dumps([1.0] * 384), "test:model-a", 384),
+        )
+
+    def scoring_must_not_run(_left, _right):
+        raise AssertionError("cosine scoring ran on a mixed embedding space")
+
+    monkeypatch.setattr("mnemosyne.store._cosine", scoring_must_not_run)
+    with pytest.raises(RuntimeError, match="mixed embedding spaces") as raised:
+        kb.search("plausible score")
+    assert "query='test:model-b'" in str(raised.value)
+    stored = kb.store.connection.execute(
+        "SELECT embedding_space, embedding_dimensions, vector FROM chunks WHERE valid_to IS NULL"
+    ).fetchone()
+    assert stored["embedding_space"] == "test:model-a"
+    assert stored["embedding_dimensions"] == 384
+    assert len(json.loads(stored["vector"])) == 384
+
+
+def test_embedding_model_environment_variable_overrides_saved_preference(tmp_path: Path, monkeypatch):
+    home = tmp_path / "data"
+    first = KnowledgeBase(
+        Settings(home, home / "knowledge.db", embed_provider="hash", vector_provider="sqlite"),
+        embedder=HashingEmbedder(),
+    )
+    first.store.save_setting("embed_model", "older-saved-model")
+    monkeypatch.setenv("MNEMO_HOME", str(home))
+    monkeypatch.setenv("MNEMO_EMBED_PROVIDER", "ollama")
+    monkeypatch.setenv("MNEMO_VECTOR_PROVIDER", "sqlite")
+    monkeypatch.setenv("OLLAMA_EMBED_MODEL", "nomic-embed-text-new")
+    restarted = KnowledgeBase(
+        Settings.load(), embedder=ModelSpaceEmbedder("ollama:nomic-embed-text-new", 768, 2.0)
+    )
+    assert restarted.settings.embed_model == "nomic-embed-text-new"
+    assert restarted.settings.embed_model != "older-saved-model"
 
 
 def test_library_stats_and_document_listing(tmp_path: Path):

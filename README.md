@@ -15,7 +15,7 @@ Think of it as a Notion-like research workspace crossed with a local RAG engine:
 - Answers questions from retrieved sources and validates citations
 - Tracks folders, tags, file types, links, saved searches, history, collections, entities, timelines, and related notes
 - Keeps append-only document revisions with `as_of` time-travel search
-- Reuses unchanged chunk vectors by content hash during incremental reindexing
+- Reuses unchanged chunk vectors by content hash only when embedding model identity and dimensions match
 - Exposes a local web UI, CLI, backup/export APIs, watch folders, and Docker setup
 
 ## Why this exists
@@ -95,6 +95,18 @@ mnemo import ~/Downloads/notion-export.zip --profile notion
 ### 1. Install
 
 Requires Python 3.11+.
+
+Windows (verified with Python 3.12):
+
+```powershell
+py -3.12 -m venv .venv-clean
+.\.venv-clean\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-clean\Scripts\python.exe -m pip install -e ".[dev,full]"
+.\.venv-clean\Scripts\python.exe -m pytest -q
+.\.venv-clean\Scripts\python.exe -m tests.model_swap_evidence
+```
+
+macOS or Linux:
 
 ```bash
 python -m venv .venv
@@ -225,7 +237,7 @@ Each chunk stores:
 - `valid_to`
 - line or page citation
 
-When a file changes, Mnemosyne diffs the new chunk set against currently active chunks by content hash. Unchanged chunk text keeps its existing vector; changed chunks get embedded once; removed chunks receive `valid_to` instead of being hard-deleted.
+When a file changes, Mnemosyne diffs the new chunk set against currently active chunks by content hash. Unchanged chunk text keeps its existing vector only inside the same embedding model and dimension; changed chunks get embedded once; removed chunks receive `valid_to` instead of being hard-deleted. Changing the embedding provider or model causes all stored chunks, including historical revisions, to be re-embedded before normal file skipping. Search refuses mixed model identities or vector dimensions instead of returning a score. See [embedding model migration](docs/embedding-model-migration.md) for direct database evidence, assertion-by-assertion test coverage, and limits.
 
 Deletes create tombstone revisions. Rollback writes a new revision whose content matches an older one, preserving the full history chain.
 
@@ -336,6 +348,7 @@ Core components:
 ```bash
 pip install -e '.[dev,full]'
 pytest -q
+python -m tests.model_swap_evidence
 docker compose build mnemosyne
 ```
 
@@ -347,6 +360,8 @@ The test suite covers:
 - historical citation resolution
 - rollback-as-new-revision
 - chunk vector reuse by content hash
+- full re-embedding and Chroma rebuilding when the embedding model changes
+- model-identity and vector-dimension validation before similarity scoring
 - FTS/vector retrieval
 - Ollama HTTP protocol behavior
 - Chroma persistence and indexed search

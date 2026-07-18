@@ -37,6 +37,10 @@ class HashingEmbedder:
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def model_identity(self) -> str:
+        return "hash:blake2b-v1"
+
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         return [self._embed_one(text) for text in texts]
 
@@ -65,6 +69,10 @@ class OllamaEmbedder:
     @property
     def dimensions(self) -> int:
         return self._dimensions
+
+    @property
+    def model_identity(self) -> str:
+        return f"ollama:{self.model}"
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
         body = json.dumps({"model": self.model, "input": list(texts)}).encode()
@@ -127,10 +135,37 @@ class ChromaVectorAdapter:
         if ids:
             self.collection.upsert(ids=list(ids), embeddings=list(vectors), metadatas=list(metadata))
 
+    def rebuild(
+        self, ids: Sequence[str], vectors: Sequence[list[float]], metadata: Sequence[dict],
+        embedding_space: str, dimensions: int,
+    ) -> None:
+        self.client.delete_collection(self.collection.name)
+        self.collection = self.client.create_collection(
+            self.collection.name,
+            metadata={"hnsw:space": "cosine", "embedding_space": embedding_space, "embedding_dimensions": dimensions},
+        )
+        self.add(ids, vectors, metadata)
+
+    def ensure_space(self, embedding_space: str, dimensions: int) -> None:
+        metadata = self.collection.metadata or {}
+        count = self.collection.count()
+        if count == 0:
+            self.collection.modify(metadata={
+                "embedding_space": embedding_space, "embedding_dimensions": dimensions,
+            })
+            return
+        if metadata.get("embedding_space") != embedding_space or metadata.get("embedding_dimensions") != dimensions:
+            raise RuntimeError("Chroma embedding space does not match SQLite; re-run ingest to rebuild the index")
+
     def delete_document(self, path: str) -> None:
         self.collection.delete(where={"document_path": path})
 
-    def query(self, vector: list[float], limit: int = 20, where: dict | None = None) -> list[tuple[int, float]]:
+    def query(
+        self, vector: list[float], limit: int = 20, where: dict | None = None,
+        embedding_space: str | None = None,
+    ) -> list[tuple[int, float]]:
+        if embedding_space is not None:
+            self.ensure_space(embedding_space, len(vector))
         kwargs = {"query_embeddings": [vector], "n_results": limit}
         if where:
             kwargs["where"] = where
