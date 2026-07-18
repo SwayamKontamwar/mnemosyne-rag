@@ -99,7 +99,7 @@ Requires Python 3.11+.
 Windows (verified with Python 3.12):
 
 ```powershell
-py -3.12 -m venv .venv-clean
+python -m venv .venv-clean
 .\.venv-clean\Scripts\python.exe -m pip install --upgrade pip
 .\.venv-clean\Scripts\python.exe -m pip install -e ".[dev,full]"
 .\.venv-clean\Scripts\python.exe -m pytest -q
