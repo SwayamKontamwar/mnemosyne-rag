@@ -346,6 +346,8 @@ Core components:
 
 ## Verification
 
+> **Real-model verification status:** the automated embedding-swap and crash tests use the deterministic offline/hash embedder and a stubbed Ollama HTTP response. They verify migration, dimensional checks, journaling, Chroma refusal, and recovery plumbing, but they do **not** prove a swap using actual `nomic-embed-text` weights. The Windows verification machine used for the committed evidence had no working Ollama service, and its installed Docker engine could not be started. Treat a real 384-to-768 Ollama model swap as unproven until `nomic-embed-text` is run and the resulting database evidence is captured. See [embedding model migration](docs/embedding-model-migration.md).
+
 ```bash
 pip install -e '.[dev,full]'
 pytest -q

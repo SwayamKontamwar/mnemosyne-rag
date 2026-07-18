@@ -18,7 +18,7 @@ Run:
 
 The command prints the complete vector read directly from SQLite before migration, the complete replacement vector read afterward, and proof fields for row identity, old-vector absence, query length, every stored vector length, and active embedding spaces. **This command uses a deterministic stub at the Ollama HTTP boundary. Its `2.0001, 2.0002, ...` vector is not a real `nomic-embed-text` embedding. It proves migration plumbing only.**
 
-This development machine does not have Ollama installed, so this release has not produced real `nomic-embed-text` weight evidence. Do not treat the committed plumbing JSON as proof of the real model's semantics or normalization. A real-model run requires an installed Ollama service with `nomic-embed-text` pulled and must additionally verify that `OllamaEmbedder.last_backend == "ollama"` so hash fallback cannot masquerade as model evidence.
+This development machine does not have a working Ollama service. No native Ollama executable was found, its local API was unavailable, and the installed Docker engine did not become ready when started. This release therefore has not produced real `nomic-embed-text` weight evidence. Do not treat the committed plumbing JSON as proof of the real model's semantics, normalization, or runtime behavior. A real-model run requires an installed Ollama service with `nomic-embed-text` pulled and must additionally verify that `OllamaEmbedder.last_backend == "ollama"` so hash fallback cannot masquerade as model evidence.
 
 The committed `model-swap-evidence.json` and `model-migration-crash-evidence.json` files are UTF-8 without a BOM.
 
