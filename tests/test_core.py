@@ -298,8 +298,8 @@ def test_chunk_previews_graph_and_clusters(tmp_path: Path):
     assert clusters
 
 
-def test_reranking_prefers_term_overlap():
-    settings = Settings(Path("/tmp/data"), Path("/tmp/data/knowledge.db"))
+def test_reranking_prefers_term_overlap(tmp_path: Path):
+    settings = Settings(tmp_path / "data", tmp_path / "data" / "knowledge.db")
     kb = KnowledgeBase(settings)
     hits = [
         SearchHit(1, "generic context", "misc", "a#L1-L2", 0.9, ("other",)),
@@ -595,7 +595,7 @@ def test_backup_restore_round_trip_preserves_searchable_chunks(tmp_path: Path):
     first.ingest(source)
     payload = first.backup()
     second = KnowledgeBase(Settings(tmp_path / "two", tmp_path / "two" / "knowledge.db"))
-    restored = second.store.restore_payload(payload)
+    restored = second.restore(payload)
     assert restored["documents"] == 1
     assert restored["chunks"] >= 1
     assert second.search("Restorable retrieval")

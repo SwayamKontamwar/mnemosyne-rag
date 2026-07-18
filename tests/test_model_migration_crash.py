@@ -26,9 +26,9 @@ class FixedEmbedder:
         return [[self.offset + (index + 1) / 10_000 for index in range(self.dimensions)] for _ in texts]
 
 
-def _worker(home: str, db_path: str, note: str, port: int) -> None:
+def _worker(home: str, db_path: str, note: str, port: int, checkpoint_name: str) -> None:
     def checkpoint(name: str) -> None:
-        if name != "during_embedding_chroma_rebuild":
+        if name != checkpoint_name:
             return
         with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
             connection.sendall(f"{os.getpid()} {name}".encode())
@@ -118,7 +118,7 @@ def _changes(before: dict, after: dict) -> dict:
     }
 
 
-def run_crash_evidence(root: Path) -> dict:
+def run_crash_evidence(root: Path, checkpoint_name: str = "after_embedding_chroma_delete") -> dict:
     home = root / "data"
     db_path = home / "knowledge.db"
     note = root / "unchanged.md"
@@ -143,13 +143,13 @@ def run_crash_evidence(root: Path) -> dict:
         listener.listen(1)
         listener.settimeout(30)
         process = multiprocessing.get_context("spawn").Process(
-            target=_worker, args=(str(home), str(db_path), str(note), listener.getsockname()[1])
+            target=_worker, args=(str(home), str(db_path), str(note), listener.getsockname()[1], checkpoint_name)
         )
         process.start()
         connection, _ = listener.accept()
         with connection:
             signal = connection.recv(200).decode()
-            assert signal == f"{process.pid} during_embedding_chroma_rebuild"
+            assert signal == f"{process.pid} {checkpoint_name}"
             assert process.is_alive()
             process.kill()
         process.join(30)
@@ -159,14 +159,15 @@ def run_crash_evidence(root: Path) -> dict:
     after_kill = _snapshot(home, db_path)
     assert after_kill["state"]["pending_migrations"]
     assert after_kill["state"]["sqlite_spaces"] == [("test:model-b", 768)]
-    assert 0 < len(after_kill["chroma"]) < len(after_kill["sqlite"])
+    assert len(after_kill["chroma"]) == 0
 
     blocked = KnowledgeBase(
         Settings(home, db_path, embed_provider="test", embed_model="model-b", vector_provider="chroma"),
         embedder=FixedEmbedder("test:model-b", 768, 2.0),
     )
-    with pytest.raises(RuntimeError, match="incomplete; re-run ingest"):
-        blocked.search("independent chunk")
+    semantic_query = "celestial orchard"
+    with pytest.raises(RuntimeError, match="incomplete; re-run ingest") as refusal:
+        blocked.search(semantic_query)
     blocked.store.connection.close()
     del blocked
     gc.collect()
@@ -176,7 +177,7 @@ def run_crash_evidence(root: Path) -> dict:
         embedder=FixedEmbedder("test:model-b", 768, 2.0),
     )
     recovery_one_engine.ingest(note)
-    assert recovery_one_engine.search("independent chunk")
+    assert recovery_one_engine.search(semantic_query)
     recovery_one_engine.store.connection.close()
     del recovery_one_engine
     gc.collect()
@@ -187,7 +188,7 @@ def run_crash_evidence(root: Path) -> dict:
         embedder=FixedEmbedder("test:model-b", 768, 2.0),
     )
     recovery_two_engine.ingest(note)
-    assert recovery_two_engine.search("independent chunk")
+    assert recovery_two_engine.search(semantic_query)
     recovery_two_engine.store.connection.close()
     del recovery_two_engine
     gc.collect()
@@ -214,6 +215,8 @@ def run_crash_evidence(root: Path) -> dict:
         },
         "proof": {
             "search_refused_while_pending": True,
+            "semantic_query": semantic_query,
+            "refusal": str(refusal.value),
             "logical_recovery_two_byte_equal": _canonical(recovery_one) == _canonical(recovery_two),
             "sqlite_ids": [row["id"] for row in recovery_two["sqlite"]],
             "chroma_ids": [row["id"] for row in recovery_two["chroma"]],
@@ -223,6 +226,33 @@ def run_crash_evidence(root: Path) -> dict:
 
 def test_real_parent_kill_during_partial_chroma_rebuild_recovers_twice(tmp_path: Path):
     run_crash_evidence(tmp_path)
+
+
+def test_empty_chroma_without_pending_journal_refuses_then_unchanged_ingest_rebuilds(tmp_path: Path):
+    home = tmp_path / "data"
+    note = tmp_path / "meaning.md"
+    note.write_text("Marine navigation relies on instruments that measure position without visible landmarks.")
+    settings = Settings(
+        home, home / "knowledge.db", embed_provider="test", embed_model="model-b",
+        vector_provider="chroma",
+    )
+    first = KnowledgeBase(settings, embedder=FixedEmbedder("test:model-b", 768, 2.0))
+    first.ingest(note)
+    expected_count = len(first.store.all_chunk_texts())
+    assert expected_count > 0
+    assert first.store.pending_embedding_migration() is None
+    first.vector_store.client.delete_collection(first.vector_store.collection.name)
+    first.vector_store.collection = first.vector_store.client.create_collection(
+        "mnemosyne", metadata={"hnsw:space": "cosine"}
+    )
+    assert first.vector_store.collection.count() == 0
+
+    restarted = KnowledgeBase(settings, embedder=FixedEmbedder("test:model-b", 768, 2.0))
+    with pytest.raises(RuntimeError, match="Chroma is empty while SQLite has vectors"):
+        restarted.search("celestial orchard")
+    assert restarted.ingest(note) == (0, 1)
+    assert restarted.vector_store.collection.count() == expected_count
+    assert restarted.search("celestial orchard")
 
 
 if __name__ == "__main__":

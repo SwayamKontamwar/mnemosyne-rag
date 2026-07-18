@@ -881,9 +881,10 @@ class KnowledgeStore:
             for chunk in chunks:
                 self.connection.execute(
                     """INSERT INTO chunks(document_path,title,text,ordinal,citation,vector,tags,start_line,end_line,page,
-                                          revision_id,document_version,content_hash,valid_from,valid_to)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (chunk["document_path"], chunk["title"], chunk["text"], chunk["ordinal"], chunk["citation"], chunk["vector"], chunk.get("tags", "[]"), chunk.get("start_line"), chunk.get("end_line"), chunk.get("page"), chunk.get("revision_id"), chunk.get("document_version", 1), chunk.get("content_hash") or _content_hash(chunk["text"]), chunk.get("valid_from") or _utc_now(), chunk.get("valid_to")),
+                                          revision_id,document_version,content_hash,valid_from,valid_to,
+                                          embedding_space,embedding_dimensions)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (chunk["document_path"], chunk["title"], chunk["text"], chunk["ordinal"], chunk["citation"], chunk["vector"], chunk.get("tags", "[]"), chunk.get("start_line"), chunk.get("end_line"), chunk.get("page"), chunk.get("revision_id"), chunk.get("document_version", 1), chunk.get("content_hash") or _content_hash(chunk["text"]), chunk.get("valid_from") or _utc_now(), chunk.get("valid_to"), chunk.get("embedding_space", ""), chunk.get("embedding_dimensions", 0)),
                 )
         return {"documents": len(documents), "chunks": len(chunks)}
 

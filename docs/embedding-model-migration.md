@@ -4,7 +4,7 @@ Mnemosyne stores an embedding-space identity and vector dimension on every chunk
 
 When `mnemo ingest` sees stored chunks from another embedding space, it re-embeds every stored chunk, including historical revisions, before applying normal file-digest skipping. SQLite vectors are replaced in one transaction and Chroma is rebuilt with the same chunk IDs. Unchanged files can therefore report as skipped after their vectors have been migrated; the skip means parsing was unnecessary, not that the old vector was reused.
 
-Search validates the requested model identity, query dimension, stored dimension metadata, and actual stored vector length before cosine scoring. Chroma validates its collection identity and dimension before querying. A mismatch raises an error instructing the user to run ingest; no cross-space score is returned.
+Search validates the requested model identity, query dimension, stored dimension metadata, actual stored vector length, and the complete Chroma ID/vector set before retrieval. Empty, partial, stale, or mismatched Chroma raises an error instructing the user to run ingest; keyword results are not returned as though vector retrieval succeeded. Ingest performs the same audit before the unchanged-file shortcut and rebuilds Chroma from SQLite when needed.
 
 Content-hash reuse remains enabled only inside the same embedding space and dimension.
 
@@ -32,7 +32,9 @@ Run the real parent-kill evidence:
 .\.venv\Scripts\python.exe -m tests.test_model_migration_crash
 ```
 
-The worker signals after SQLite has committed and after only the first Chroma batch has been placed. The parent calls the OS process-kill API, requires a negative exit code, snapshots both stores and the full journal, confirms search refuses, recovers twice, and compares the complete canonical logical snapshots byte for byte. It also reports every filesystem path added, removed, or modified between stages.
+The worker signals after SQLite has committed and immediately after deleting the Chroma collection, before recreating it or adding any replacement vector. The parent calls the OS process-kill API, requires a negative exit code, snapshots both stores and the full journal, confirms a semantic-only query refuses instead of quietly returning keyword-only results, recovers twice, and compares the complete canonical logical snapshots byte for byte. It also reports every filesystem path added, removed, or modified between stages.
+
+The suite also deletes and recreates an empty Chroma collection without leaving a pending journal, which reproduces the independent empty-index case. Search must refuse. Re-ingesting an unchanged source must rebuild the index before returning the normal `(0 indexed, 1 skipped)` file result, after which the no-shared-word semantic query must return a hit.
 
 ## What the focused tests assert
 
@@ -60,6 +62,7 @@ The worker signals after SQLite has committed and after only the first Chroma ba
 
 ## Limits
 
-- SQLite and Chroma do not share one transaction. SQLite is the recovery source of truth. A durable pending journal prevents search while Chroma is old, empty, or partial; the next ingest rebuilds and verifies Chroma from SQLite before clearing that refusal.
+- SQLite and Chroma do not share one transaction. SQLite is the recovery source of truth. A durable pending journal prevents search during known migrations. A full pre-search consistency audit also catches empty, old, partial, or externally damaged Chroma state when no pending journal exists. The next ingest rebuilds and verifies Chroma from SQLite before applying file-digest skipping.
+- The full ID/vector audit currently reads every active Chroma vector before each search. This favors correctness over large-library query latency and will need a cryptographically bound generation manifest before it can be made constant-time without weakening the check.
 - A model serving different dimensions under the same unchanged model name is detected when a query or new embedding is produced. Mnemosyne cannot detect changed model weights that retain both the same configured name and dimensions; use a distinct model/version name when changing weights.
 - Existing databases without embedding metadata are treated as legacy/mismatched and fully re-embedded on the next ingest.

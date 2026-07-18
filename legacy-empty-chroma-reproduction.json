@@ -1,0 +1,19 @@
+{
+  "source_version": "run this script with PYTHONPATH pointing at mnemosyne-rag commit 9acc47f",
+  "process": {
+    "signal": "16624 after_embedding_chroma_delete",
+    "exit_code": -15
+  },
+  "after_kill": {
+    "sqlite_count": 1,
+    "chroma_count": 0
+  },
+  "semantic_query": "celestial orchard",
+  "semantic_hits_before_recovery": 0,
+  "documented_recovery_ingest_result": [
+    0,
+    1
+  ],
+  "chroma_count_after_recovery": 0,
+  "semantic_hits_after_recovery": 0
+}

@@ -48,6 +48,7 @@ class KnowledgeBase:
     def ingest(self, source: Path) -> tuple[int, int]:
         self._recover_pending_embedding_migration()
         self._migrate_embedding_space_if_needed()
+        self._repair_vector_index_if_needed()
         indexed = skipped = 0
         for path in discover(source):
             digest = file_digest(path)
@@ -127,7 +128,9 @@ class KnowledgeBase:
                 self._known_embedding_dimensions(),
             )
             if self.vector_store:
-                self.vector_store.ensure_space(self._embedding_space(), self._known_embedding_dimensions())
+                self.vector_store.ensure_space(
+                    self._embedding_space(), self._known_embedding_dimensions(), allow_empty=True
+                )
                 for key in ("inserted", "closed"):
                     rows = revision.get(key, [])
                     self.vector_store.add(
@@ -149,6 +152,7 @@ class KnowledgeBase:
         as_of: str | None = None,
     ) -> list[SearchHit]:
         self.store.assert_no_pending_embedding_migration()
+        self._assert_vector_index_consistent()
         generator = generator or self._retrieval_generator()
         plan = self._query_plan(query, generator)
         candidate_limit = max(20, limit * 6)
@@ -412,6 +416,11 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
     def backup(self) -> dict:
         return self.store.backup_payload()
 
+    def restore(self, payload: dict) -> dict[str, int]:
+        restored = self.store.restore_payload(payload)
+        self._repair_vector_index_if_needed()
+        return restored
+
     def diagnostics(self, limit: int = 100) -> list[dict]:
         return [diagnostic.__dict__ for diagnostic in self.store.list_diagnostics(limit)]
 
@@ -500,6 +509,51 @@ QUESTION:\n{query}\n\nSOURCES:\n{context}\n\nDRAFT:\n{answer}\n\nREVISED ANSWER:
                 [str(chunk_id) for chunk_id, _, _ in rows], [vector for _, vector, _ in rows]
             )
         self.store.complete_embedding_migration(migration["id"])
+
+    def _assert_vector_index_consistent(self) -> None:
+        if not self.vector_store:
+            return
+        rows = self.store.all_vector_rows()
+        if not rows:
+            return
+        dimensions = {len(vector) for _, vector, _ in rows}
+        spaces = self.store.embedding_spaces()
+        if len(dimensions) != 1 or len(spaces) != 1:
+            raise RuntimeError("SQLite contains mixed embedding spaces; re-run ingest")
+        embedding_space, metadata_dimensions = next(iter(spaces))
+        actual_dimensions = next(iter(dimensions))
+        if metadata_dimensions != actual_dimensions:
+            raise RuntimeError("SQLite embedding metadata does not match stored vector dimensions; re-run ingest")
+        self.vector_store.ensure_space(embedding_space, actual_dimensions)
+        self.vector_store.verify_vectors(
+            [str(chunk_id) for chunk_id, _, _ in rows], [vector for _, vector, _ in rows]
+        )
+
+    def _repair_vector_index_if_needed(self) -> None:
+        if not self.vector_store:
+            return
+        try:
+            self._assert_vector_index_consistent()
+            return
+        except RuntimeError:
+            rows = self.store.all_vector_rows()
+            if not rows:
+                return
+            spaces = self.store.embedding_spaces()
+            dimensions = {len(vector) for _, vector, _ in rows}
+            if len(spaces) != 1 or len(dimensions) != 1:
+                raise
+            embedding_space, metadata_dimensions = next(iter(spaces))
+            actual_dimensions = next(iter(dimensions))
+            if metadata_dimensions != actual_dimensions:
+                raise
+            self.vector_store.rebuild(
+                [str(chunk_id) for chunk_id, _, _ in rows],
+                [vector for _, vector, _ in rows],
+                [metadata for _, _, metadata in rows],
+                embedding_space, actual_dimensions,
+            )
+            self._assert_vector_index_consistent()
 
     def _checkpoint(self, name: str) -> None:
         if self._crash_hook:

@@ -364,7 +364,8 @@ The test suite covers:
 - chunk vector reuse by content hash
 - full re-embedding and Chroma rebuilding when the embedding model changes
 - model-identity and vector-dimension validation before similarity scoring
-- journaled refusal and repeatable recovery when a process is killed between SQLite migration and Chroma completion
+- journaled refusal and repeatable recovery when a process is killed after Chroma deletion but before replacement vectors are added
+- refusal on an empty or mismatched Chroma index, plus repair from SQLite before unchanged-file skipping
 - FTS/vector retrieval
 - Ollama HTTP protocol behavior
 - Chroma persistence and indexed search

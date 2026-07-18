@@ -409,7 +409,7 @@ def backup() -> JSONResponse:
 @app.post("/api/restore")
 def restore(payload: dict) -> dict:
     try:
-        return knowledge.store.restore_payload(payload)
+        return knowledge.restore(payload)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, f"Invalid backup: {exc}") from exc
 

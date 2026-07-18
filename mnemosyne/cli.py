@@ -109,7 +109,7 @@ def main() -> None:
     elif args.command == "backup":
         print(json.dumps(kb.backup(), indent=2))
     elif args.command == "restore":
-        print(json.dumps(kb.store.restore_payload(json.loads(args.path.read_text())), indent=2))
+        print(json.dumps(kb.restore(json.loads(args.path.read_text())), indent=2))
     elif args.command == "import":
         indexed, skipped = kb.import_archive(args.path.expanduser(), args.profile)
         print(f"Imported {indexed} file(s); skipped {skipped} unchanged file(s).")

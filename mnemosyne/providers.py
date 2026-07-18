@@ -142,10 +142,14 @@ class ChromaVectorAdapter:
         batch_size: int = 100,
     ) -> None:
         self.client.delete_collection(self.collection.name)
+        if checkpoint:
+            checkpoint("after_embedding_chroma_delete")
         self.collection = self.client.create_collection(
             self.collection.name,
             metadata={"hnsw:space": "cosine", "embedding_space": embedding_space, "embedding_dimensions": dimensions},
         )
+        if checkpoint:
+            checkpoint("after_embedding_chroma_create")
         for start in range(0, len(ids), batch_size):
             stop = start + batch_size
             self.add(ids[start:stop], vectors[start:stop], metadata[start:stop])
@@ -180,14 +184,16 @@ class ChromaVectorAdapter:
             if max((abs(left - right) for left, right in zip(stored, expected)), default=0.0) > 1e-6:
                 raise RuntimeError(f"Chroma vector differs from SQLite vector for chunk {item_id}")
 
-    def ensure_space(self, embedding_space: str, dimensions: int) -> None:
+    def ensure_space(self, embedding_space: str, dimensions: int, *, allow_empty: bool = False) -> None:
         metadata = self.collection.metadata or {}
         count = self.collection.count()
         if count == 0:
-            self.collection.modify(metadata={
-                "embedding_space": embedding_space, "embedding_dimensions": dimensions,
-            })
-            return
+            if allow_empty:
+                self.collection.modify(metadata={
+                    "embedding_space": embedding_space, "embedding_dimensions": dimensions,
+                })
+                return
+            raise RuntimeError("Chroma is empty while SQLite has vectors; re-run ingest to rebuild the index")
         if metadata.get("embedding_space") != embedding_space or metadata.get("embedding_dimensions") != dimensions:
             raise RuntimeError("Chroma embedding space does not match SQLite; re-run ingest to rebuild the index")
 
